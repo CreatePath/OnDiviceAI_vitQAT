@@ -9,6 +9,7 @@ import timm
 import torch
 import torchvision
 
+from .augment import validate_augment_args
 from .data import loader, make_data
 from .training import evaluate, read_checkpoint, save_checkpoint, seed_all, train_epoch
 
@@ -26,6 +27,7 @@ def run(args, *, build_model, measure_model, train_epoch_fn=train_epoch,
         raise ValueError("Require latency_repeats >= 1 and latency_warmup >= 0")
     if not 0 <= args.label_smoothing < 1 or not 0 <= args.drop_path < 1 or args.weight_decay < 0:
         raise ValueError("Invalid label smoothing, drop path or weight decay")
+    validate_augment_args(args)  # 증강 옵션 값 검사 (필드별 메시지, NaN/inf 포함)
     if args.threads > 0:
         torch.set_num_threads(args.threads)
     output = Path(args.output)

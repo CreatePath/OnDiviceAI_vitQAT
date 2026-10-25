@@ -1,5 +1,6 @@
 import timm
 from timm.models.vision_transformer import VisionTransformer
+from .constants import NUM_CLASSES
 from .cropr_adapter import adapt_model
 
 from .quantization import prepare_qat
@@ -7,7 +8,7 @@ from .quantization import prepare_qat
 def build_scratch_vit(args):
     if args.image_size <= 0:
         raise ValueError("image_size must be positive")
-    model = timm.create_model(args.model, pretrained=False, num_classes=101,
+    model = timm.create_model(args.model, pretrained=False, num_classes=NUM_CLASSES,
                               img_size=args.image_size, global_pool="token", drop_path_rate=args.drop_path)
     if not isinstance(model, VisionTransformer):
         raise ValueError("--model must name a timm VisionTransformer architecture")

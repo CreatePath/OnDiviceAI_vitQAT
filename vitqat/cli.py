@@ -3,6 +3,8 @@ import argparse
 
 import torch
 
+from .augment import AUGMENT_DEFAULTS
+
 
 def parser():
     p = argparse.ArgumentParser(description="Food-101 scratch ViT training")
@@ -38,6 +40,15 @@ def parser():
     p.add_argument("--label-smoothing", type=float, default=0.1)
     p.add_argument("--drop-path", type=float, default=0.1)
     p.add_argument("--clip-grad", type=float, default=1.0)
+    # 데이터 증강 옵션. 기본값은 모두 "기존 동작 그대로"이며 구현은 vitqat/augment.py에 있다.
+    p.add_argument("--mixup", type=float, default=AUGMENT_DEFAULTS["mixup"],
+                   help="Mixup alpha (0 = off). Standard recipe (DeiT): 0.8")
+    p.add_argument("--cutmix", type=float, default=AUGMENT_DEFAULTS["cutmix"],
+                   help="CutMix alpha (0 = off). Standard recipe (DeiT): 1.0")
+    p.add_argument("--random-erasing", type=float, default=AUGMENT_DEFAULTS["random_erasing"],
+                   help="RandomErasing probability (0 = off). Standard recipe (DeiT): 0.25")
+    p.add_argument("--crop-min-scale", type=float, default=AUGMENT_DEFAULTS["crop_min_scale"],
+                   help="Minimum area fraction of RandomResizedCrop (0.08 = torchvision default)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--val-fraction", type=float, default=0.1)
     p.add_argument("--resume")

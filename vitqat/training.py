@@ -4,7 +4,10 @@ import random
 
 import numpy as np
 import torch
+from timm.loss import SoftTargetCrossEntropy
 from torch import nn
+
+from .augment import AUGMENT_DEFAULTS, augment_batch, build_mixup
 
 
 def seed_all(seed):
@@ -43,11 +46,19 @@ def learning_rate(step, total, warmup, peak, minimum):
 
 def train_epoch(model, batches, optimizer, args, epoch, steps_per_epoch):
     model.train()
-    loss_fn = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+    # augment.py 연결 지점 1: Mixup/CutMix가 꺼져 있으면 mixup_fn은 None이고 손실도 기존과 같다.
+    # 켜져 있으면 target이 soft target이 되므로 SoftTargetCrossEntropy를 쓴다.
+    # (label smoothing은 Mixup이 soft target에 이미 반영하므로 여기서 또 걸지 않는다.)
+    mixup_fn = build_mixup(args.mixup, args.cutmix, args.label_smoothing)
+    loss_fn = (nn.CrossEntropyLoss(label_smoothing=args.label_smoothing) if mixup_fn is None
+               else SoftTargetCrossEntropy())
     optimizer.zero_grad(set_to_none=True)
     total_loss, main_total, aux_total, count, updates = 0.0, 0.0, 0.0, 0, 0
     for i, (images, target) in enumerate(batches):
         images, target = images.to(args.device), target.to(args.device)
+        # augment.py 연결 지점 2: 꺼져 있으면 입력을 그대로 돌려준다.
+        # 켜져 있으면 target이 soft target이 되므로 아래 main/aux 손실이 모두 같은 target을 쓴다.
+        images, target = augment_batch(mixup_fn, images, target, args.label_smoothing)
         start = (i // args.accum_steps) * args.accum_steps
         end = min(start + args.accum_steps, len(batches))
         # Account for both the final short accumulation group and a partial last batch.
@@ -107,7 +118,10 @@ def read_checkpoint(path, model, args, split_hash, optimizer=None):
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     ignored = {"resume", "eval_checkpoint", "output", "data_root", "download", "device", "workers",
                "latency_warmup", "latency_repeats", "threads"}
-    for key, value in checkpoint["config"].items():
+    # 증강 옵션이 생기기 전의 옛 checkpoint에는 증강 키가 없다. 없는 키는 "꺼짐"으로 학습한 것으로 간주해서
+    # 비교해야, 옛 checkpoint를 --mixup 등을 켠 채로 이어 학습해 실험이 섞이는 일을 막을 수 있다.
+    saved_config = {**AUGMENT_DEFAULTS, **checkpoint["config"]}
+    for key, value in saved_config.items():
         if key not in ignored and getattr(args, key) != value:
             raise ValueError(f"Checkpoint config mismatch: {key}: {value!r} != {getattr(args, key)!r}")
     if checkpoint["split_hash"] != split_hash:
