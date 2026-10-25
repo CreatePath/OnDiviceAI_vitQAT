@@ -1,11 +1,9 @@
 import copy
-import json
 import math
 from pathlib import Path
 
 import pytest
 import torch
-from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -160,25 +158,6 @@ def test_checkpoint_resumes_identical_training(tmp_path, mode):
     args.activation_bits = 8
     with pytest.raises(ValueError, match="activation_bits"):
         read_checkpoint(path, other, args, "split")
-
-
-@pytest.fixture
-def food_fixture(tmp_path):
-    root = tmp_path / "food-101"
-    (root / "meta").mkdir(parents=True)
-    manifests = {"train": {}, "test": {}}
-    for c in range(101):
-        name = f"class_{c:03d}"
-        (root / "images" / name).mkdir(parents=True)
-        for split, count in [("train", 3), ("test", 1)]:
-            manifests[split][name] = []
-            for i in range(count):
-                rel = f"{name}/{split}_{i}"
-                Image.new("RGB", (40, 40), (c * 2, 30 + i * 40, 80)).save(root / "images" / f"{rel}.jpg")
-                manifests[split][name].append(rel)
-    for split, manifest in manifests.items():
-        (root / "meta" / f"{split}.json").write_text(json.dumps(manifest))
-    return tmp_path
 
 
 @pytest.mark.parametrize("mode", ["fp32", "qat"])

@@ -107,6 +107,14 @@ AMP와 TF32를 사용하지 않는다. Layer-wise LR decay도 사용하지 않�
 
 학습 전처리는 RandomResizedCrop, horizontal flip, RandAugment, ImageNet normalization이다.
 평가는 Resize(256/224 배율), CenterCrop, 같은 normalization을 사용한다.
+
+### 선택형 데이터 증강
+
+`--mixup`, `--cutmix`, `--random-erasing`, `--crop-min-scale` 옵션으로 train 증강을 추가할 수 있다.
+기본값은 모두 꺼짐이라 옵션을 주지 않으면 위의 기본 전처리와 같다.
+**비교 실험(FP32/QAT/Cropr)은 모두 같은 증강 설정을 써야 하고**, 증강을 켜면 `train_loss`를 끈 실험과 비교할 수 없다.
+옵션 설명, 값 가이드, 확인 방법은 [augmentation.md](augmentation.md)를 참고한다.
+
 동일한 seed에서 FP32/QAT 모델의 모든 학습 파라미터 초기값이 일치한다.
 
 Food-101 공식 train 75,750장을 `--seed 42 --val-fraction 0.1` 기준 클래스별로

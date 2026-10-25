@@ -7,6 +7,8 @@ from cropr.cls.cropr import Cropr, CrossAttention
 cropr_package.Cropr = Cropr
 from cropr.cls.vision_transformer import VisionTransformer as CroprViT
 
+from .constants import NUM_CLASSES
+
 
 def adapt_model(base, args):
     if base.num_prefix_tokens != 1:
@@ -25,7 +27,7 @@ def adapt_model(base, args):
     cfg = dict(use_cropr=args.use_cropr, pruning_rate=args.cropr_pruning_rate, llf=args.cropr_llf,
                num_queries=1, num_heads=1, pre_attn_norm=False, q_proj=False, k_proj=False,
                v_proj=False, mlp=True, mlp_ratio=4, training=True)
-    model = CroprViT(cfg, num_classes=101, img_size=args.image_size,
+    model = CroprViT(cfg, num_classes=NUM_CLASSES, img_size=args.image_size,
                      patch_size=base.patch_embed.patch_size[0], embed_dim=base.embed_dim,
                      depth=len(base.blocks), num_heads=base.blocks[0].attn.num_heads,
                      mlp_ratio=4, global_pool="token", drop_path_rate=args.drop_path)

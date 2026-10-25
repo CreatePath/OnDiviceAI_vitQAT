@@ -8,6 +8,9 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from torchvision.transforms import InterpolationMode
 
+from .augment import build_train_transform
+from .constants import NUM_CLASSES
+
 
 def stratified_split(labels, fraction, seed):
     if not 0 < fraction < 1:
@@ -33,10 +36,9 @@ def seed_worker(worker_id):
 
 def make_data(args):
     norm = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-    training = transforms.Compose([
-        transforms.RandomResizedCrop(args.image_size, interpolation=InterpolationMode.BICUBIC),
-        transforms.RandomHorizontalFlip(), transforms.RandAugment(), transforms.ToTensor(), norm,
-    ])
+    # train 증강은 augment.py가 조립한다(옵션을 안 주면 기존 transform과 동일).
+    # 아래 evaluation은 val/test용이라 증강을 넣지 않는다.
+    training = build_train_transform(args.image_size, args.crop_min_scale, args.random_erasing, norm)
     evaluation = transforms.Compose([
         transforms.Resize(round(args.image_size * 256 / 224), interpolation=InterpolationMode.BICUBIC),
         transforms.CenterCrop(args.image_size), transforms.ToTensor(), norm,
@@ -44,7 +46,7 @@ def make_data(args):
     train_data = datasets.Food101(args.data_root, split="train", transform=training, download=args.download)
     val_data = datasets.Food101(args.data_root, split="train", transform=evaluation)
     test_data = datasets.Food101(args.data_root, split="test", transform=evaluation)
-    if len(train_data.classes) != 101 or train_data.classes != test_data.classes:
+    if len(train_data.classes) != NUM_CLASSES or train_data.classes != test_data.classes:
         raise ValueError("Food-101 requires matching 101-class train/test mappings")
     train_indices, val_indices = stratified_split(train_data._labels, args.val_fraction, args.seed)
     manifest = dict(train_indices=train_indices, val_indices=val_indices,
