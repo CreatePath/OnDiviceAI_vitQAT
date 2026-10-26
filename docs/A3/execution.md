@@ -8,6 +8,8 @@
 
 ## 실행
 
+실행 전 [실험 설계의 주의사항 / 합의 사항](experiment-design.md)을 확인한다. 선행 학습 증강 설정은 그대로 인수하되 dense/pruned 평가에는 학습 증강을 적용하지 않는다. Query 학습 이력과 실제 checkpoint 호환 여부를 확인하고, 합성 fixture 통과를 실제 정확도·가속 검증으로 해석하지 않는다.
+
 저장소의 `environment.yml` 환경을 활성화한다. 아래 경로는 인수 파일의 예시다. **실제 학습된 query 파일이 있어야 한다.**
 
 ```powershell

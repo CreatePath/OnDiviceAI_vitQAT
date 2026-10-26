@@ -116,3 +116,36 @@ Pruning 시 backbone parameter 수는 같지만 query 3,840개(D=384, 10 modules
 Batch 1, warmup 10, repeats 100, 같은 validation image와 장치, CUDA synchronize 조건으로 전체 forward latency를 측정한다. Scorer, sorting/gather, LLF cache/복원을 포함한다. GFLOPs는 MAC=2 FLOPs로 dot-product scorer 비용을 포함하고 norm/sort/copy 등 제외 항목을 명시한다. QAT는 fake quantization을 유지하므로 `latency_backend=fake_quant_fp32`, `integer_latency_ms=null`이다. 발표의 RTX 4090을 실제 측정 장치로 가정하지 않는다.
 
 학습 산출물과 query 원본은 보존하고 결과는 별도 평가 폴더에 저장한다. 두 checkpoint hash, split hash, score 방식, router 정밀도, 실제 trace, 라이브러리/장치 정보를 결과에 남긴다.
+
+## 8. 주의사항 / 합의 사항
+
+### 비교 조건과 증강
+
+- A3의 기준은 **앞선 QAT-only 실험의 실제 config/checkpoint**다. 모델, bit 수, pooling, 초기화, 학습 하이퍼파라미터, 증강 조건을 A3에서 새로 정하지 않는다. W4A8·Small과 표의 기본값은 예상 예시다.
+- 같은 비교에 묶는 선행 FP32/QAT/joint 실험은 **같은 학습 증강 설정**을 사용해야 한다. 인수 시 Mixup/CutMix/RandomErasing/crop scale을 확인한다. 설정이 다르면 pruning·양자화 효과만의 비교로 해석하지 않고 조건 차이를 따로 기록한다. A3 자체는 재학습하지 않는다.
+- **Dense/pruned 정확도 평가는 같은 split·class mapping·평가 전처리로 수행**하며 Mixup/CutMix/RandomErasing을 적용하지 않는다. 같은 checkpoint를 공유하므로 선행 모델의 학습 증강 이력도 두 조건에서 같다.
+- Mixup/CutMix를 사용한 학습의 `train_loss`는 soft target 기준이며, Cropr 학습은 auxiliary loss까지 포함할 수 있다. 서로 다른 손실 정의의 `train_loss`로 방법의 우열을 판단하지 않는다. 정확도 비교는 val/test Top-1을 사용하고, A3 추가 손실은 dense Top-1에서 pruned Top-1을 뺀 **pp**로 보고한다.
+- 강한 증강이 저비트 QAT 수렴을 어렵게 하거나 pruning 후 정확도 손실을 늘린다는 설명은 **검증이 필요한 가설**이다. 현재 A3 테스트로 학습 수렴이나 정확도 효과를 확인한 것은 아니다. 증강 강도 변경은 선행 실험에서 결정하고 별도 조건으로 기록한다.
+
+### Query와 평가 경계
+
+- Cropr에는 학습된 query가 필요하다. **QAT-only 모델만으로 추가 학습 없는 Cropr를 완성할 수 없다.** Query를 제공받을지, 별도 범위에서 학습할지는 아직 미결정이며 이번 evaluator는 query를 학습하지 않는다.
+- Query 학습 데이터·증강·loss·seed·학습 중 pruning 여부와 backbone/observer 고정 여부를 기록한다. Query의 학습 효과가 포함된다는 사실을 명시하고, 학습하지 않은 query나 다른 backbone의 query를 무조건 호환된다고 취급하지 않는다.
+- A3 평가에서 backbone·observer·query를 갱신하지 않는다. Fake quantization은 유지하며 재보정이나 optimizer step은 수행하지 않는다. Test split으로 query/R/위치/checkpoint를 고르지 않는다.
+- Query bundle의 학습 완료 표시와 provenance는 제공자의 이력 선언이다. Hash/shape/config 검사는 결합 조건을 확인하는 것이며, **query가 실제 학습됐다는 사실을 파일만으로 증명하지는 않는다.**
+- R=16에서 첫 단계는 17개다. 12-block/224/patch16 조건의 최대 TPR은 82.14%지만 LLF 복원 후 마지막 block 입력 TPR은 0%다. 이 수치를 전체 연산량 감소율이나 실제 speedup으로 대신 사용하지 않는다.
+
+### 재현성·호환성·측정 해석
+
+| 항목 | 현재 확인된 범위 | 실제 실험에서 남길 사항 |
+|---|---|---|
+| 선행 설정 상속 | A3 fixture에서 비기본 LR/epochs/label smoothing/bit/experiment 유지 및 평가 batch 분리 확인 | 실제 checkpoint config와 두 조건의 공통 backbone/split hash |
+| 증강 이전 checkpoint | 기존 CPU 테스트에서 증강 키 누락 시 off 기본값 보완, 증강 설정 불일치 거부 확인 | 실제 인수 파일의 코드 버전·증강 설정. 다른 구현/pretrained 모델은 loader 지원 여부 확인 |
+| Mixup RNG 재개 | 기존 `test_resume_reproduces_mixup_randomness`가 소규모 CPU fixture에서 NumPy RNG 저장·복원을 확인 | 실제 장기 학습·다른 장치/버전까지 동일하다고 보장하지 않음. A3는 학습을 재개하지 않음 |
+| A3 재현성 | 같은 sample/seed 사용, 원본 Cropr forward 동등성, 평가 전후 state 불변과 실제 trace 검사 | 라이브러리·GPU·thread·측정 입력 기록. 동점에서 원본 `stable=False`를 사용하므로 장치 간 동일 token 선택을 보장하지 않음 |
+| 속도와 용량 | Fake-quant FP32 forward 및 router 포함 지표를 측정하도록 구현 | 실제 저비트 kernel 속도와 구분. Query/cache/LLF 비용 포함, 파일 크기와 packed 추정 분리 |
+| 실제 정확도 | 합성 fixture와 ViT-S W4A8 forward 검증만 완료 | Food-101 정확도·수렴·실제 장치 speedup은 미측정. 입력 모델/query 인수 후 검증 |
+
+기존 테스트 근거는 [증강 테스트](../../tests/test_augment.py), A3 근거는 [평가 테스트](../../A3/tests/test_eval_pruning.py)와 [pruning 테스트](../../A3/tests/test_inference_pruning.py)다. 검증한 환경과 건너뛴 GPU 항목은 [실행 문서](execution.md)에 기록한다.
+
+코드는 `A3/`, 문서는 `docs/A3/`에서 관리하고 기존 ViT/QAT/Cropr 코드는 변경하지 않는다. 위 조건이나 query 학습 범위를 바꾸면 실험 설계·실행 config·결과 해석을 함께 갱신한다.

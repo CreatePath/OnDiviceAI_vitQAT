@@ -21,6 +21,8 @@ FP32 학습과 QAT-only 학습은 다른 담당자가 수행한다. 이 작업�
 | [구현 아키텍처](architecture.md) | 모듈 책임, checkpoint/router 로드, forward와 지표, 구현 검증 |
 | [실행 방법](execution.md) | 실제 CLI, query 파일 형식, 설정 상속과 산출물 |
 
+**주의사항 / 합의 사항**은 [실험 설계 8절](experiment-design.md)에 정리했다. 같은 비교군의 증강 일치, Top-1 비교 기준, query 학습 경계, RNG/구형 checkpoint 검증 범위, fake-quant 측정의 해석을 확인한다.
+
 ## 확인된 결정
 
 - Model 및 QAT 조건: 앞선 QAT-only 실험을 따른다. 현재 예상 예시는 ViT-S/16, 224 입력, 101 classes, W4A8이다.
