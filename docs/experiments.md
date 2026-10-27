@@ -1,5 +1,10 @@
 # Food-101 ViT 실험 1-1 / 1-2
 
+ViT-S/16에서 **다른 담당자의 QAT-only 모델에 추론 Cropr router**를 적용하는 후속 실험은
+[실험 설계 폴더](A3/README.md)에 정리했다.
+논문 파라미터, 실험 조건, 구현 아키텍처를 별도 문서로 관리한다. 추론 경로는 구현했으며,
+[실행 방법과 query 파일 계약](A3/execution.md)을 참고한다. 실제 학습된 query 확보 방식은 미결정이다.
+
 - 1-1: `vit_tiny_patch16_224`, 101 classes, CLS pooling, FP32 scratch 학습.
 - 1-2: 동일 모델과 초기값으로 시작하는 QAT-only scratch 학습. Pruning 없음.
 - 같은 실행 코드에서 Cropr on/off와 QAT on/off를 독립적으로 조합할 수 있다.
@@ -37,10 +42,29 @@ Food-101 파일은 `data/food-101/{images,meta}`에서 읽는다. `--download`�
 실험명은 모델 동작을 바꾸지 않는다. Cropr FP32 실행에는 PTQ가 포함되지 않는다.
 기존 `python -m experiments.train` 명령은 `python -m vitqat.train`으로 변경되었다.
 
-## 코드 확장 방법
+## 실험별 독립 폴더 구조
 
-실험별로 학습 코드를 복사하지 않고, 단일 실행 진입점에 옵션을 전달한다.
-실험 결과는 각각 다른 `--output runs/...` 경로에 저장한다.
+새 실험의 코드는 저장소 루트의 `<실험 ID>/`, 문서는 `docs/<실험 ID>/`에 따로 둔다.
+A3는 **`A3/`에 코드·전용 지표·테스트**, **`docs/A3/`에 설계·파라미터·아키텍처·실행 문서**를 관리한다.
+폴더 배치와 재사용 규칙은 [실험 폴더 구조 문서](experiment-folder-structure.md)를 따른다.
+
+```text
+A3/          # A3 실험 코드, tests/, 로컬 checkpoints/ 및 runs/
+docs/A3/     # A3 실험 문서
+vitqat/      # 기존 ViT·QAT 코드, A3가 수정 없이 import
+cropr/       # 기존 Cropr 원본
+tests/       # 기존 공통 회귀 테스트
+```
+
+앞선 실험의 config/checkpoint를 상속하고 A3에서는 추론 pruning만 추가한다.
+새 실험 동작을 기존 ViT 코드에 직접 넣지 않고 해당 실험 폴더의 wrapper·adapter에서 구현한다.
+실행 명령은 [A3 실행 방법](A3/execution.md), 세부 구조는 [A3 아키텍처](A3/architecture.md)를 참고한다.
+
+## 기존 공통 코드의 구성과 재사용
+
+기존 기준선에서 모델 크기·학습 조건·정밀도만 비교할 때는 공통 실행 진입점에 옵션을 전달한다.
+새 알고리즘을 추가하는 독립 실험은 위 폴더 구조를 따른다. 학습 코드를 통째로 복사하지 않고
+필요한 공통 기능을 import해서 사용하며, 실험 결과는 각 실험의 별도 output 경로에 저장한다.
 
 ```text
 vitqat/
@@ -58,8 +82,8 @@ tests/              # 회귀 및 옵션/확장 검증
 docs/experiments.md # 실행 방법
 ```
 
-모델 크기·학습 조건·정밀도 비교는 옵션만 바꾼다. 새 알고리즘은 해당 기능 모듈에 구현하고
-`train.py`에서 선택하도록 연결한다. `runner.run()`은 `build_model`, `measure_model`을 받고,
+새 알고리즘은 각 실험 폴더에 구현하고 전용 진입점에서 연결한다.
+공통 `runner.run()`은 `build_model`, `measure_model`을 받고,
 필요하면 `train_epoch_fn`, `evaluate_fn`, `data_factory`도 교체할 수 있어 공통 epoch/checkpoint
 코드를 수정하지 않고 새 모델, 보조 loss, 평가 방식을 연결할 수 있다.
 
@@ -71,8 +95,8 @@ Cropr on/off 모두 원본의 forward/pruning/LLF 경로를 사용하고, 선택
 QAT 전용 CrossAttention subclass는 `quantization.py`에 두며 원본 scorer를 수정하지 않는다.
 원본 transformer block과 호환되는 표준 ViT 아키텍처(Tiny/Small 등의 MLP ratio 4, qkv bias 사용)를 지원한다.
 `measure_vit()`는 실제 block 입력과 pruner 출력을 관측하여 토큰 수와 연산량을 계산한다.
-변경한 기능의 테스트는 `tests/test_<기능>.py`로 추가한다.
-동일 파일을 수정하면 충돌은 여전히 가능하지만, 학습 실행 조건을 바꾸기 위해 코드를 수정할 필요는 없다.
+기존 공통 기능의 테스트는 `tests/`에 유지한다. 독립 실험의 테스트는 `<실험 ID>/tests/`에 추가한다.
+학습 실행 조건만 바꿀 때는 공통 코드를 수정하지 않고 옵션을 사용한다.
 
 ## Cropr 옵션
 
