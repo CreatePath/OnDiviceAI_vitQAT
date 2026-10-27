@@ -83,12 +83,17 @@ Conv는 unfold 뒤 행렬곱을 수행한다. 현재 fast decoding, layout propa
 ## 체크포인트 평가
 
 ```bash
-python -m vitqat.train --mode qat --weight-bits 2 --activation-bits 8 \
+python -m vitqat.train \
   --device cuda --data-root data --output runs/w2a8_bitblas_eval \
   --eval-checkpoint runs/w2a8/best.pt --cuda-w2a8-inference
 ```
 
-모델, 이미지 크기, epochs, 증강, Cropr, 데이터 분할 설정은 체크포인트와 맞춘다.
+평가에서는 모델, 이미지 크기, 양자화 비트, Cropr, seed와 데이터 분할 설정을 체크포인트에서 자동 복원한다.
+`--mode`, `--mixup`, `--epochs` 등 학습 옵션을 다시 입력할 필요가 없다.
+저장된 실험 설정이 CLI의 해당 설정보다 우선한다. 장치, 데이터 경로, 출력 경로, 배치 크기,
+workers/threads, latency 반복 설정과 `--cuda-w2a8-inference`는 CLI 값을 사용한다.
+평가에는 optimizer를 만들지 않으며, 데이터 분할 해시와 가중치의 strict 로딩 검사는 유지한다.
+학습 재개(`--resume`)는 기존처럼 학습 설정 일치를 검사한다.
 기존 지표는 fake-quant 결과이고 `cuda_w2a8_*`는 변환 모델의 정확도와 latency이다.
 `cuda_w2a8_backend`와 `cuda_w2a8_backend_version`에 구현과 버전을 기록한다.
 가중치 바이트 수에는 정렬용 패딩도 포함한다.
