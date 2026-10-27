@@ -1,0 +1,4 @@
+# Add to the existing training environment. Native execution uses TensorRT's
+# trtexec binary (standard TensorRT 10.x SDK/container), not TensorRT-RTX.
+onnx==1.17.0
+onnxruntime==1.20.1
