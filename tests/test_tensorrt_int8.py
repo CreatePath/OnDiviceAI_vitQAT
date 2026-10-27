@@ -1,6 +1,6 @@
 """CPU numerical/export checks; these do not establish native TensorRT speed."""
 import copy
-import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -41,20 +41,55 @@ def test_reject_uncalibrated_or_wrong_bits():
         convert_tensorrt_int8(layer)
 
 
-def test_native_report_parsing(tmp_path):
-    from scripts.benchmark_tensorrt_int8 import read_native_results
+def test_native_result_summary():
+    from scripts.benchmark_tensorrt_int8 import summarize_results
 
-    (tmp_path / "example.times.json").write_text(json.dumps([
-        {"computeMs": value} for value in (1, 4, 3, 2)]))
-    (tmp_path / "example.outputs.json").write_text(json.dumps([
-        {"name": "logits", "values": [0.25, 0.75]}]))
-    result = read_native_results(tmp_path, "example", torch.tensor([[0.25, 0.75]]))
+    logits = torch.tensor([[0.25, 0.75]])
+    result = summarize_results([1, 4, 3, 2], logits, logits)
     assert result["gpu_compute_ms_median"] == 2.5
     assert result["gpu_compute_ms_p95"] == 4
     assert result["synthetic_native_vs_reference_max_abs_error"] == 0
-    (tmp_path / "example.times.json").write_text("[]")
     with pytest.raises(ValueError, match="timings"):
-        read_native_results(tmp_path, "example", torch.tensor([[0.25, 0.75]]))
+        summarize_results([], logits, logits)
+    with pytest.raises(ValueError, match="logits"):
+        summarize_results([1], logits.flatten(), logits)
+
+
+def test_native_requires_cuda(monkeypatch):
+    from scripts.benchmark_tensorrt_int8 import require_tensorrt
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="CUDA-enabled PyTorch"):
+        require_tensorrt("cuda")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Native TensorRT requires CUDA PyTorch")
+@pytest.mark.parametrize("quantized", [False, True])
+def test_native_python_execution(tmp_path, quantized):
+    pytest.importorskip("tensorrt")
+    from scripts.benchmark_tensorrt_int8 import benchmark_engine, require_tensorrt
+
+    torch.manual_seed(42)
+    x = torch.randn(16, 32)
+    if quantized:
+        layer = QATLinear(32, 32)
+        layer.input_quant, layer.weight_quant, layer.output_quant = Quantizer(8), Quantizer(2, weight=True), Quantizer(8)
+        with torch.no_grad():
+            layer(x)
+        layer = convert_tensorrt_int8(layer.eval())
+        tolerance = float(layer.output_quant.scale) * 2
+    else:
+        layer = torch.nn.Linear(32, 32).eval()
+        tolerance = 1e-4
+    with torch.no_grad():
+        reference = layer(x)
+    export_onnx(layer, x, tmp_path / "native.onnx")
+    options = SimpleNamespace(device="cuda", warmup_ms=0, duration=0, iterations=2)
+    result = benchmark_engine(require_tensorrt("cuda"), tmp_path, "native", x, reference, options)
+    assert result["samples"] == 2
+    assert result["synthetic_native_vs_reference_max_abs_error"] <= tolerance
+    assert (tmp_path / "native.engine").stat().st_size > 0
+    assert (tmp_path / "native.layers.json").is_file()
 
 
 @pytest.mark.parametrize("cropr,llf,scope", [

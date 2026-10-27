@@ -37,17 +37,18 @@ Cropr 정렬은 export 사본에서 `stable=False`를 생략해 ONNX exporter가
 
 ## 준비
 
-기존 학습 환경에서 다음 export 의존성을 추가한다.
+기존 CUDA PyTorch 학습 환경에서 아래 명령으로 필요한 Python 패키지를 설치한다.
+TensorRT Python bindings와 CUDA 12용 runtime도 함께 설치된다.
+`trtexec`, 별도 SDK 다운로드, 실행 파일 경로 설정은 필요 없다.
 
 ```bash
 python -m pip install -r requirements-tensorrt.txt
 python -m pytest tests/test_tensorrt_int8.py -q
 ```
 
-실제 GPU 실행에는 **표준 TensorRT 10.x SDK/컨테이너의 `trtexec`**가 필요하다.
-이 requirements 파일은 TensorRT나 CUDA를 설치하지 않는다.
-Windows용 별도 제품 TensorRT-RTX는 이 경로의 대상이 아니다.
-TensorRT 11의 CLI 변경도 이 스크립트에서 검증하지 않았다.
+TensorRT는 `tensorrt-cu12==10.13.3.9`로 고정한다. NVIDIA 드라이버와 CUDA-enabled PyTorch는 필요하다.
+TensorRT-RTX나 TensorRT 11은 이 실행 경로의 대상이 아니다.
+CPU에서 export만 할 경우에는 `python -m pip install onnx==1.17.0 onnxruntime==1.20.1`이면 된다.
 
 체크포인트는 `--mode qat --weight-bits 2 --activation-bits 8`로 학습하고 observer 상태가 채워져 있어야 한다.
 모델 설정은 체크포인트에서 복원한다. W2A2, 비활성 fake quant, 미초기화 observer는 거부한다.
@@ -71,27 +72,29 @@ batch와 이미지 크기는 고정이다. 다른 batch로 실행하려면 해�
 python -m scripts.benchmark_tensorrt_int8 \
   --checkpoint runs/w2a8/best.pt \
   --output runs/tensorrt_int8 --batch-size 1 \
-  --trtexec /usr/src/tensorrt/bin/trtexec \
   --warmup-ms 1000 --duration 10 --iterations 100
 ```
 
-두 ONNX를 각각 TensorRT 엔진으로 만들고 동일 입력으로 측정한다. 실행 로그는 파일에 기록된다.
-빌드 실패 시 다른 backend로 fallback하지 않고 오류로 종료한다.
-명시적 Q/DQ를 사용하므로 무작위 calibration으로 precision을 지정하는 `--int8` 옵션은 추가하지 않는다.
-FP16 옵션도 켜지 않는다. 실제 INT8로 선택되지 않은 연산은 FP32로 남을 수 있다.
+두 ONNX를 TensorRT Python API로 각각 엔진으로 만들고 동일 입력으로 측정한다.
+GPU 선택은 `--device cuda:0` 등으로 지정한다. 빌드 진단은 터미널에 출력하며,
+실패 시 report에 오류를 기록하고 종료한다. 다른 backend로 fallback하지 않는다.
+명시적 Q/DQ를 사용하며 별도의 무작위 calibration은 수행하지 않는다.
+FP16도 켜지 않는다. 실제 INT8로 선택되지 않은 연산은 FP32로 남을 수 있다.
 
 - `*.engine`: 해당 GPU/TensorRT 환경용 엔진.
-- `*.log`: TensorRT 버전, 장치, 빌드 오류, 성능 요약.
 - `*.layers.json`: 실제 엔진 레이어, tensor format/type, tactic 정보.
 - `*.times.json`: warmup 이후 GPU 측정 원자료.
 - `*.outputs.json`: 합성 입력에 대한 실제 엔진 logits.
 - `report.json`: 변환 전후 합성 logits 차이, ONNX attention Q/DQ 검사,
-  실행 명령, native/reference logits 차이, GPU median/p95와 속도비.
+  TensorRT/CUDA 버전, 장치, 측정 설정, native/reference logits 차이, GPU median/p95와 속도비.
 
 `gpu_compute_speedup_vs_trt_fp32 > 1`이면 해당 조건에서 TensorRT FP32보다 빠르다.
-이 값은 PyTorch FP32 대비 속도비가 아니다. `--noTF32`, `--noDataTransfers`, `--useSpinWait`를
-두 엔진에 동일하게 적용한다. 데이터 로딩/전송과 빌드 시간은 측정 대상이 아니며 CUDA Graph는 켜지 않는다.
-`trtexec`는 미리 enqueue하므로 이 GPU 시간은 기존 PyTorch의 동기화된 host latency와 직접 비교하지 않는다.
+이 값은 PyTorch FP32 대비 속도비가 아니다. 두 엔진 모두 TF32를 끄고 동일 방식으로 측정한다.
+PyTorch CUDA tensor의 주소를 TensorRT에 연결하고 같은 CUDA stream에서 실행한다.
+입력 전송과 첫 실행·warmup을 마친 뒤 각 forward를 CUDA event로 재고 매번 동기화한다.
+데이터 로딩/전송과 빌드 시간은 측정에서 제외하고 CUDA Graph는 켜지 않는다.
+이 값은 host latency가 아니며 Python enqueue 지연이 CUDA event 구간에 일부 포함될 수 있다.
+이전 `trtexec` 측정과도 enqueue 방식이 달라 직접 같은 지표로 취급하면 안 된다.
 
 `w2_int8.layers.json`에서 backbone attention의 두 BMM 또는 해당 fused attention 레이어의
 입력 format/type 및 tactic을 확인한다. INT8 Q/DQ나 reformat 레이어가 존재한다는 것만으로는
@@ -114,13 +117,17 @@ ONNX checker, attention 입력의 Q/DQ 연결, ONNX Runtime 출력, CLI export�
 로컬에는 학습 체크포인트와 TensorRT 실행 환경이 없어 실제 엔진 빌드, INT8 커널 선택,
 RTX 4090 속도 및 Food-101 정확도는 아직 검증하지 않았다. 가속 여부는 위 GPU 명령으로 확인해야 한다.
 
-2026-10-28 로컬 검증 결과:
+2026-10-28 최초 export 구현 검증 결과:
 
 - PyTorch 2.14.1 CPU 환경: 전체 `tests` 75 passed, 30 skipped. CUDA 항목은 실행하지 못했다.
 - 별도 PyTorch 2.3.0 CPU / torchvision 0.18.0 CPU 환경: 신규 테스트 8 passed.
 - ONNX 1.17.0 / ONNX Runtime 1.20.1로 실제 export 및 CPU 실행 검증.
 - 테스트 체크포인트는 무작위 초기화 모델의 observer를 합성 입력으로 채운 것이며 학습된 모델이 아니다.
 
+Python API 실행 경로에는 FP32/INT8 엔진을 실제로 생성·실행하는 native 테스트를 추가했다.
+CUDA PyTorch 또는 TensorRT가 없는 환경에서는 해당 테스트를 건너뛰며, 통과로 간주하지 않는다.
+Python API 전환 후 PyTorch 2.3 CPU에서 관련 테스트는 9 passed, native 2 skipped였다.
+
 참고: [TensorRT explicit quantization](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/inference-library/work-quantized-types.html),
 [엔진 검사 도구](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/engine-tools.html),
-[trtexec 측정 구현](https://github.com/NVIDIA/TensorRT/blob/release/10.8/samples/common/sampleReporting.cpp).
+[TensorRT Python API](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/python-api-docs.html).
