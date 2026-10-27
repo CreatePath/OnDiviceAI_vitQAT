@@ -1,3 +1,5 @@
+> **Current implementation (2026-10-27):** The following is the previous learned-query design and paper notes. A3 inference now selects tokens using CLS self-attention Top-K, retaining the Cropr removal schedule and LLF. No query checkpoint is required. See [execution](execution.md).
+
 # 실험 설계
 
 ## 1. 담당 범위와 연구 질문

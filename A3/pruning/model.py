@@ -20,11 +20,11 @@ class PrunedOutput:
 
 
 class InferenceModePruner(InferencePrunedViT):
-    """Dense during train(), supplied learned-query pruning during eval()."""
+    """Dense during train(), CLS attention pruning during eval()."""
 
-    def __init__(self, backbone, queries, config):
+    def __init__(self, backbone, config):
         was_training = backbone.training
-        super().__init__(backbone, queries, config)
+        super().__init__(backbone, config)
         self.train(was_training)
 
     def forward(self, images):
@@ -32,6 +32,28 @@ class InferenceModePruner(InferencePrunedViT):
             self.last_trace = None
             return self.backbone(images)
         return super().forward(images)
+
+
+class TrainAndInferencePruner(InferencePrunedViT):
+    """Use CLS attention Top-K in both train and eval, returning logits."""
+
+    def __init__(self, backbone, config):
+        was_training = backbone.training
+        super().__init__(backbone, config)
+        self.train(was_training)
+
+    def forward(self, images):
+        return self._forward_pruned(images)
+
+
+class TrainOnlyPruner(TrainAndInferencePruner):
+    """Prune during training; run the dense backbone during evaluation."""
+
+    def forward(self, images):
+        if not self.training:
+            self.last_trace = None
+            return self.backbone(images)
+        return self._forward_pruned(images)
 
 
 class TrainablePruner(nn.Module):
@@ -46,7 +68,9 @@ class TrainablePruner(nn.Module):
         # Reuse the validation without random fallback in the inference API.
         rates = config.schedule(len(backbone.blocks), backbone.patch_embed.num_patches)
         if queries is not None:
-            InferencePrunedViT._validate_queries(backbone, queries, rates)
+            expected = {str(i + 1) for i in range(len(rates))}
+            if set(queries) != expected or any(q.shape != (1, 1, backbone.embed_dim) for q in queries.values()):
+                raise ValueError("Invalid Cropr query mapping or dimension")
         if getattr(backbone, "use_cropr", False) or backbone.num_prefix_tokens != 1:
             raise ValueError("Require a dense backbone with one CLS token")
         if not callable(getattr(backbone, "forward_embed", None)):
@@ -106,17 +130,26 @@ def attach_pruning(model, *, queries=None, config=None, pruning_rate=16,
                    llf=True, apply_during="inference"):
     """Attach without editing the original class or reinitializing its weights.
 
-    inference: train=dense, eval=pruned; supplied trained queries are mandatory.
-    train_and_inference: explicit initialization of trainable Cropr auxiliary
-    branches; caller owns training, loss, optimizer and quantizer policy.
+    inference: train=dense, eval=CLS attention Top-K pruning; no queries.
+    train: train=CLS attention Top-K pruning, eval=dense; no queries.
+    train_and_inference: CLS attention Top-K in both train and eval; no queries.
+    cropr_train_and_inference: legacy learned-query Cropr and auxiliary heads.
     """
     if isinstance(model, (InferencePrunedViT, TrainablePruner)):
         raise ValueError("Pruning is already attached")
     config = config or PruningConfig(pruning_rate=pruning_rate, llf=llf)
     if apply_during == "inference":
-        if queries is None:
-            raise ValueError("Inference mode requires supplied learned queries")
-        return InferenceModePruner(model, queries, config)
+        if queries is not None:
+            raise ValueError("CLS attention pruning does not use queries")
+        return InferenceModePruner(model, config)
     if apply_during == "train_and_inference":
+        if queries is not None:
+            raise ValueError("CLS attention pruning does not use queries")
+        return TrainAndInferencePruner(model, config)
+    if apply_during == "train":
+        if queries is not None:
+            raise ValueError("CLS attention pruning does not use queries")
+        return TrainOnlyPruner(model, config)
+    if apply_during == "cropr_train_and_inference":
         return TrainablePruner(model, config, queries)
-    raise ValueError("apply_during must be inference or train_and_inference")
+    raise ValueError("apply_during must be train, inference, train_and_inference or cropr_train_and_inference")

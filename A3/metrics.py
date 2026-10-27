@@ -7,7 +7,7 @@ from torch import nn
 from vitqat.cropr_adapter import Cropr, CrossAttention
 
 from vitqat.quantization import QATConv2d, QATLinear, Quantizer
-from .pruning import QueryRouter
+from .pruning import AttentionRouter
 
 
 @torch.inference_mode()
@@ -33,8 +33,9 @@ def measure_vit(model, image_size, device, warmup=10, repeats=100, *, sample=Non
 
     def count_pruner(module, inputs, output):
         nonlocal flops
-        # Inference uses only query-key scoring; auxiliary aggregation/heads are not run.
-        flops += 2 * module.num_queries * inputs[0].shape[1] * module.embed_dim
+        # Cropr scoring adds dot products; CLS attention reuses the existing attention matrix.
+        if isinstance(module, Cropr):
+            flops += 2 * module.num_queries * inputs[0].shape[1] * module.embed_dim
         tokens_after_pruning.append(output[0].shape[1])
 
     def count(module, inputs, output):
@@ -46,7 +47,7 @@ def measure_vit(model, image_size, device, warmup=10, repeats=100, *, sample=Non
 
     hooks = [m.register_forward_hook(count) for m in model.modules() if isinstance(m, (nn.Linear, nn.Conv2d))]
     hooks += [block.register_forward_pre_hook(count_attention) for block in model.blocks]
-    hooks += [m.register_forward_hook(count_pruner) for m in model.modules() if isinstance(m, (Cropr, QueryRouter))]
+    hooks += [m.register_forward_hook(count_pruner) for m in model.modules() if isinstance(m, (Cropr, AttentionRouter))]
     try:
         model(x)
     finally:
@@ -102,8 +103,8 @@ def measure_vit(model, image_size, device, warmup=10, repeats=100, *, sample=Non
     return dict(
         params=params, inference_params=params - auxiliary_params,
         quantized_weight_params=quantized_weights, gflops=flops / 1e9,
-        router_params=sum(p.numel() for m in model.modules() if isinstance(m, QueryRouter) for p in m.parameters()),
-        flops_convention="2 FLOPs/MAC; inference Conv/Linear, ViT QK/AV, Cropr QK; excludes bias, norm, softmax, sorting, quantization",
+        router_params=sum(p.numel() for m in model.modules() if isinstance(m, AttentionRouter) for p in m.parameters()),
+        flops_convention="2 FLOPs/MAC; inference Conv/Linear, ViT QK/AV, Cropr QK when present; CLS score reduction excluded; excludes bias, norm, softmax, sorting, quantization",
         storage_estimated_packed_bytes=estimated_bytes,
         storage_estimate_note="All parameter payload including training-only auxiliary branches + quantization scales/zero points; excludes serialization overhead; not an exported integer model",
         token_pruning_ratio=(tokens - minimum_tokens) / patch_tokens,

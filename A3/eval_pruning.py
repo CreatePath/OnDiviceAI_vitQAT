@@ -30,7 +30,6 @@ def sha256_file(path):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", required=True, help="Upstream QAT-only best.pt")
-    p.add_argument("--router-checkpoint", required=True, help="Learned query bundle, format_version=1")
     p.add_argument("--output", required=True, help="New empty evaluation directory")
     p.add_argument("--evaluation-id", default="S-QAT-P")
     p.add_argument("--data-root", help="Override data location only, not its split")
@@ -94,34 +93,6 @@ def validate_qat_state(model):
         raise ValueError("Non-finite backbone checkpoint state")
 
 
-def load_router_bundle(path, backbone_hash, split_hash, model, pruning):
-    bundle = torch.load(path, map_location="cpu", weights_only=True)
-    if not isinstance(bundle, dict) or bundle.get("format_version") != 1:
-        raise ValueError("Router bundle must have format_version=1; no random-query fallback")
-    if bundle.get("backbone_sha256") != backbone_hash:
-        raise ValueError("Router backbone_sha256 does not match this QAT checkpoint")
-    if bundle.get("split_hash") != split_hash:
-        raise ValueError("Router split_hash does not match inherited data split")
-    expected = pruning.describe(len(model.blocks), model.patch_embed.num_patches)
-    if bundle.get("router_config") != expected:
-        raise ValueError("Router config does not match the documented inference configuration")
-    training = bundle.get("training")
-    required = {"method", "data", "backbone_frozen", "observers_frozen", "pruning_during_training"}
-    if (not isinstance(training, dict) or not required <= training.keys()
-            or any(not isinstance(training[k], str) or not training[k].strip() for k in ("method", "data"))
-            or any(type(training[k]) is not bool for k in required - {"method", "data"})
-            or bundle.get("queries_are_trained") is not True):
-        raise ValueError("Router requires trained queries and explicit training provenance")
-    # Construction validates exact block mapping, tensor shape and finite values.
-    queries = bundle.get("queries")
-    provenance = {key: value for key, value in bundle.items() if key != "queries"}
-    try:
-        json.dumps(provenance, allow_nan=False)
-    except (TypeError, ValueError) as error:
-        raise ValueError("Router provenance must contain finite JSON metadata") from error
-    return queries, provenance
-
-
 def state_digest(model):
     """Byte-exact parameter/buffer digest, without retaining another full model copy."""
     digest = hashlib.sha256()
@@ -138,7 +109,6 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("Choose a new empty evaluation output directory")
     backbone_hash = sha256_file(options.checkpoint)
-    router_hash = sha256_file(options.router_checkpoint)
     checkpoint = torch.load(options.checkpoint, map_location="cpu", weights_only=True)
     args = inherited_args(checkpoint, options)
     seed_all(args.seed)
@@ -157,11 +127,8 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
             module.fake_quant.disable_observer()
     model.requires_grad_(False)
     pruning = PruningConfig()
-    queries, provenance = load_router_bundle(options.router_checkpoint, backbone_hash,
-                                            manifest["sha256"], model, pruning)
-    pruned = attach_pruning(model, queries=queries, config=pruning, apply_during="inference")
-    # Resolve all input/compatibility errors before lengthy test evaluation.
-    original_state, router_state = state_digest(model), state_digest(pruned.routers)
+    pruned = attach_pruning(model, config=pruning, apply_during="inference")
+    original_state = state_digest(model)
     if len(val_data) == 0:
         raise ValueError("Validation data is required for the latency sample")
     sample_index = args.seed % len(val_data)
@@ -187,29 +154,26 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
                                args.latency_warmup, args.latency_repeats, sample=sample)
         results[condition] = dict(common, **measured, top1_acc=test["top1_acc"],
                                   test_loss=test["loss"], test_samples=test["samples"],
-                                  inference_pruning=condition == "pruned",
-                                  router_checkpoint_sha256=router_hash if condition == "pruned" else None)
+                                  inference_pruning=condition == "pruned")
         if condition == "pruned":
             results[condition].update(pruning.describe(len(model.blocks), model.patch_embed.num_patches))
-    if state_digest(model) != original_state or state_digest(pruned.routers) != router_state:
+    if state_digest(model) != original_state:
         raise RuntimeError("Evaluation changed backbone, quantizer or router state")
-    if (sha256_file(options.checkpoint) != backbone_hash
-            or sha256_file(options.router_checkpoint) != router_hash):
+    if sha256_file(options.checkpoint) != backbone_hash:
         raise RuntimeError("An input checkpoint changed during evaluation")
     dense, reduced = results["dense"], results["pruned"]
     comparison = dict(checkpoint_sha256=backbone_hash, split_hash=manifest["sha256"],
                       top1_loss_pp=dense["top1_acc"] - reduced["top1_acc"],
                       latency_speedup=dense["latency_ms_median"] / reduced["latency_ms_median"],
                       gflops_ratio=reduced["gflops"] / dense["gflops"],
-                      backbone_state_unchanged=True, router_state_unchanged=True)
+                      backbone_state_unchanged=True)
     # Guard against replacing inputs or outputs created while evaluation was running.
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise ValueError("Evaluation output directory is no longer empty")
     documents = {"evaluation_config": dict(training_config=checkpoint["config"],
                     evaluation_options=vars(options), effective_config=vars(args),
-                    checkpoint_sha256=backbone_hash, router_provenance=provenance,
-                    router_checkpoint_sha256=router_hash,
+                    checkpoint_sha256=backbone_hash,
                     pruning=pruning.describe(len(model.blocks), model.patch_embed.num_patches)),
                  "split": manifest, "dense_metrics": dense, "pruned_metrics": reduced,
                  "comparison": comparison}

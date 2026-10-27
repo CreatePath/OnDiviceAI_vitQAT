@@ -1,4 +1,4 @@
-# A3: QAT-only 모델의 추론 Cropr 실험
+# A3: CLS attention 기반 토큰 pruning
 
 실험 코드와 테스트를 기존 `vitqat/`, `cropr/`, `tests/`에서 분리했다. 기존 모델 생성·체크포인트 로더는 수정 없이 import해서 사용한다.
 
@@ -19,6 +19,6 @@ python -m A3.eval_pruning --help
 python -m pytest A3/tests -q
 ```
 
-실제 평가는 선행 QAT-only checkpoint와 학습된 query bundle이 필요하다. Hyperparameter는 선행 config를 상속하며, 기본 pruning은 R=16·첫 단계 17개·LLF on이다.
+A3 추론 평가는 QAT-only 체크포인트를 사용한다. CLS attention Top-K에는 학습된 query가 필요 없다. 기본 스케줄은 첫 단계 17개, 이후 각 단계 16개를 제거하고 LLF를 적용한다. 학습·추론 라이브러리 사용과 검증 결과는 [구현 기록](../docs/A3/cls-attention-pruning.md)을 참조한다.
 
 다른 학습·추론 코드에서 재사용하려면 `from A3.pruning import attach_pruning`을 사용한다. 호출 방법과 보조 loss 계약은 [라이브러리 API](../docs/library-api.md)에 정리했다. `inference_pruning.py`는 이전 import의 호환 파일이다.

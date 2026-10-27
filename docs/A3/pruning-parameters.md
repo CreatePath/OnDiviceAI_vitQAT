@@ -1,3 +1,5 @@
+> **Current implementation (2026-10-27):** The following is the previous learned-query design and paper notes. A3 inference now selects tokens using CLS self-attention Top-K, retaining the Cropr removal schedule and LLF. No query checkpoint is required. See [execution](execution.md).
+
 # Token Cropr 논문 기준 pruning 파라미터
 
 확인일: 2026-10-26. [논문 PDF](../../papers/05_qat_token_pruning/2025_Bergner_Token_Cropr.pdf)의 PDF 3~5, 8쪽(인쇄 페이지 9742~9744, 9747), 식 (1)~(7), 표 1·4와 저장소의 원본 구현을 확인했다.
