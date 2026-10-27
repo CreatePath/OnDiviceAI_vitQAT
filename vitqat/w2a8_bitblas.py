@@ -4,15 +4,37 @@ BitBLAS computes integer dot products. PyTorch applies the original QAT affine
 corrections and scales. Compilation is cached per shape/device, before timing.
 """
 from functools import lru_cache
+import ctypes
+from importlib.metadata import distribution, PackageNotFoundError
 import platform
 
 import torch
 from torch.nn import functional as F
 
 
+@lru_cache(maxsize=1)
+def _load_nvrtc():
+    """Preload pip's NVRTC by absolute path before TVM resolves its SONAME."""
+    try:
+        package = distribution("nvidia-cuda-nvrtc-cu12")
+    except PackageNotFoundError:
+        path = "libnvrtc.so.12"  # Allow a system CUDA Toolkit installation.
+    else:
+        path = str(package.locate_file("nvidia/cuda_nvrtc/lib/libnvrtc.so.12"))
+    try:
+        return ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+    except OSError as error:
+        raise RuntimeError(
+            f"Cannot load CUDA 12 NVRTC from {path}: {error}. "
+            "Run python -m pip install --force-reinstall nvidia-cuda-nvrtc-cu12==12.1.105 "
+            "in the same Python environment. See docs/cuda-w2a8.md."
+        ) from error
+
+
 def require_bitblas():
     if platform.system() != "Linux":
         raise RuntimeError("BitBLAS requires Linux CUDA; see docs/cuda-w2a8.md. No fallback was used.")
+    _load_nvrtc()
     try:
         import bitblas
     except ImportError as error:

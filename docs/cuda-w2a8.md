@@ -22,9 +22,7 @@ API는 해당 배포 wheel의 소스로 확인했지만, 이 조합의 실제 �
 
 ```bash
 python -m pip install -r requirements-bitblas.txt
-CUDA_NVRTC_LIB_DIR="$(python -c 'from importlib.metadata import distribution; print(distribution("nvidia-cuda-nvrtc-cu12").locate_file("nvidia/cuda_nvrtc/lib"))')"
-export LD_LIBRARY_PATH="${CUDA_NVRTC_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-python -c "import torch, bitblas; assert torch.cuda.is_available(); print(torch.__version__, bitblas.__version__, torch.cuda.get_device_name())"
+python -c "import torch; from vitqat.w2a8_bitblas import require_bitblas; bitblas = require_bitblas(); assert torch.cuda.is_available(); print(torch.__version__, bitblas.__version__, torch.cuda.get_device_name())"
 python -m pytest tests/test_bitblas_w2a8.py -k native -q -rs
 ```
 
@@ -37,15 +35,24 @@ BitBLAS에 포함된 TVM은 CUDA 12 NVRTC 공유 라이브러리를 로딩한다
 이 오류는 라이브러리가 설치되지 않았거나 동적 로더의 검색 경로에 없는 경우 발생한다.
 PyTorch의 CUDA 실행이 가능하더라도 TVM의 라이브러리 로딩이 성공한다는 뜻은 아니다.
 
-프로젝트의 CUDA 12.1 환경에서는 다음 명령으로 NVRTC를 준비하고, 위의
-`CUDA_NVRTC_LIB_DIR`와 `LD_LIBRARY_PATH` 명령을 실행한 뒤 새 Python 프로세스에서 확인한다.
+프로젝트의 `require_bitblas()`는 pip 패키지의 NVRTC를 절대 경로로 먼저 로딩한 뒤 BitBLAS를 import한다.
+이 경로에는 NVRTC용 `LD_LIBRARY_PATH` 설정이 필요하지 않다. 저장소 루트에서 다음 명령으로 확인한다.
 
 ```bash
 python -m pip install nvidia-cuda-nvrtc-cu12==12.1.105
-python -c "import ctypes; ctypes.CDLL('libnvrtc.so.12'); import torch, bitblas; print(bitblas.__version__)"
+python -c "from vitqat.w2a8_bitblas import require_bitblas; print(require_bitblas().__version__)"
 ```
 
-환경 변수는 같은 셸에서 시작하는 학습·벤치마크 프로세스에 적용된다.
+`python -c 'import bitblas'`는 프로젝트의 사전 로딩을 거치지 않는다. 직접 import하려면
+다음 환경 변수를 설정한 뒤 새 Python 프로세스를 시작한다.
+
+```bash
+CUDA_NVRTC_LIB_DIR="$(python -c 'from importlib.metadata import distribution; print(distribution("nvidia-cuda-nvrtc-cu12").locate_file("nvidia/cuda_nvrtc/lib"))')"
+export LD_LIBRARY_PATH="${CUDA_NVRTC_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+python -c "import torch, bitblas; print(bitblas.__version__)"
+```
+
+사전 로딩에 실패하면 시도한 절대 경로와 원래 로더 오류를 출력한다.
 NVRTC 패키지는 전체 CUDA Toolkit이나 `nvcc`를 대신하지 않는다.
 
 ## 양자화 방식과 범위
