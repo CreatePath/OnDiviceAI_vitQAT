@@ -1,3 +1,5 @@
 # Linux x86_64 CUDA environment; the Windows wheel is not available.
 -r requirements.txt
+# TVM loads NVRTC by soname; expose its lib directory via LD_LIBRARY_PATH.
+nvidia-cuda-nvrtc-cu12==12.1.105; platform_system == "Linux"
 bitblas==0.1.0.post1

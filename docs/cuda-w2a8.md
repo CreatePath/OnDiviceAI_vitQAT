@@ -22,12 +22,31 @@ API는 해당 배포 wheel의 소스로 확인했지만, 이 조합의 실제 �
 
 ```bash
 python -m pip install -r requirements-bitblas.txt
+CUDA_NVRTC_LIB_DIR="$(python -c 'from importlib.metadata import distribution; print(distribution("nvidia-cuda-nvrtc-cu12").locate_file("nvidia/cuda_nvrtc/lib"))')"
+export LD_LIBRARY_PATH="${CUDA_NVRTC_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 python -c "import torch, bitblas; assert torch.cuda.is_available(); print(torch.__version__, bitblas.__version__, torch.cuda.get_device_name())"
 python -m pytest tests/test_bitblas_w2a8.py -k native -q -rs
 ```
 
 native 테스트 12개가 모두 실행되는지 확인한다. 건너뛴 테스트는 통과로 간주하지 않는다.
 초기 변환과 처음 보는 행렬 크기에서는 라이브러리 컴파일 시간이 발생한다.
+
+### `libnvrtc.so.12`를 찾지 못할 때
+
+BitBLAS에 포함된 TVM은 CUDA 12 NVRTC 공유 라이브러리를 로딩한다.
+이 오류는 라이브러리가 설치되지 않았거나 동적 로더의 검색 경로에 없는 경우 발생한다.
+PyTorch의 CUDA 실행이 가능하더라도 TVM의 라이브러리 로딩이 성공한다는 뜻은 아니다.
+
+프로젝트의 CUDA 12.1 환경에서는 다음 명령으로 NVRTC를 준비하고, 위의
+`CUDA_NVRTC_LIB_DIR`와 `LD_LIBRARY_PATH` 명령을 실행한 뒤 새 Python 프로세스에서 확인한다.
+
+```bash
+python -m pip install nvidia-cuda-nvrtc-cu12==12.1.105
+python -c "import ctypes; ctypes.CDLL('libnvrtc.so.12'); import torch, bitblas; print(bitblas.__version__)"
+```
+
+환경 변수는 같은 셸에서 시작하는 학습·벤치마크 프로세스에 적용된다.
+NVRTC 패키지는 전체 CUDA Toolkit이나 `nvcc`를 대신하지 않는다.
 
 ## 양자화 방식과 범위
 
