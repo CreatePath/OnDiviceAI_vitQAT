@@ -55,4 +55,6 @@ def parser():
     p.add_argument("--eval-checkpoint")
     p.add_argument("--latency-warmup", type=int, default=10)
     p.add_argument("--latency-repeats", type=int, default=100)
+    p.add_argument("--cuda-w2a8-inference", action="store_true",
+                   help="Evaluate W2A8 Linear/Conv and A8 attention using CUDA integer GEMM")
     return p

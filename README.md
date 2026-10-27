@@ -1,4 +1,6 @@
 # OnDiviceAI_vitQAT
+
+CUDA W2A8 inference: [docs/cuda-w2a8.md](docs/cuda-w2a8.md).
 온디바이스 AI - vit , QAT , ptq
 
 ```powershell

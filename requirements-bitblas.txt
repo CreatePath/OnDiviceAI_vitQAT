@@ -1,0 +1,3 @@
+# Linux x86_64 CUDA environment; the Windows wheel is not available.
+-r requirements.txt
+bitblas==0.1.0.post1
