@@ -4,6 +4,8 @@
 
 `A3.inference_pruning`과 `A3.eval_pruning`을 구현했다. 선행 QAT-only checkpoint의 학습 설정을 복원하고, 학습된 query를 별도로 로드해 dense/pruned를 한 번에 평가한다. 모델/bit/epochs/LR 등의 재지정 옵션은 두지 않았다. 학습이나 query 초기화·학습을 실행하지 않는다.
 
+Pruning 구현은 현재 `A3/pruning/` 라이브러리로 분리되어 있고 평가 CLI도 `attach_pruning`을 사용한다. 별도 학습 코드에서 재사용하는 모드와 보조 loss 처리 예시는 [라이브러리 API](../library-api.md)에 있다. 이 평가 명령은 학습 모드를 실행하지 않는다.
+
 현재 loader는 저장소 `vitqat.train`이 저장한 QAT-only checkpoint와 Food-101 데이터 경로를 지원한다. 다른 구현, pretrained/custom pooling/custom preprocessing 모델은 해당 모델을 그대로 재현하는 loader adapter가 필요하다. 지원되지 않는 조건을 기본 Small/W4A8로 대체하지 않는다.
 
 ## 실행

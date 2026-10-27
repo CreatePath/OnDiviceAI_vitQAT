@@ -13,7 +13,8 @@
     __init__.py
     README.md                     # 코드 진입 안내와 실험 문서 링크
     eval_pruning.py               # 설정 상속, checkpoint 로드, paired 평가
-    inference_pruning.py          # A3 router / Top-K / LLF
+    inference_pruning.py          # 이전 import 경로 호환
+    pruning/                      # import해서 재사용하는 학습/추론 API
     metrics.py                    # A3 전용 측정
     tests/                        # A3 전용 테스트와 fixture
     checkpoints/                  # 인수한 모델/query, 필요 시 로컬 생성

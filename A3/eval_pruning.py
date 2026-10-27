@@ -12,7 +12,7 @@ import torchvision
 
 from vitqat.augment import AUGMENT_DEFAULTS
 from vitqat.data import loader, make_data
-from .inference_pruning import InferencePrunedViT, PruningConfig
+from .pruning import attach_pruning, PruningConfig
 from .metrics import measure_vit
 from vitqat.models import build_model
 from vitqat.quantization import Quantizer, freeze_observers
@@ -159,7 +159,7 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
     pruning = PruningConfig()
     queries, provenance = load_router_bundle(options.router_checkpoint, backbone_hash,
                                             manifest["sha256"], model, pruning)
-    pruned = InferencePrunedViT(model, queries, pruning)
+    pruned = attach_pruning(model, queries=queries, config=pruning, apply_during="inference")
     # Resolve all input/compatibility errors before lengthy test evaluation.
     original_state, router_state = state_digest(model), state_digest(pruned.routers)
     if len(val_data) == 0:

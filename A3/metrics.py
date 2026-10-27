@@ -7,7 +7,7 @@ from torch import nn
 from vitqat.cropr_adapter import Cropr, CrossAttention
 
 from vitqat.quantization import QATConv2d, QATLinear, Quantizer
-from .inference_pruning import QueryRouter
+from .pruning import QueryRouter
 
 
 @torch.inference_mode()

@@ -24,12 +24,16 @@ Dense/pruned의 backbone weight와 quantizer buffer는 동일하며 평가 전�
 
 ## 2. 모듈 책임
 
+공개 기능은 `A3/pruning/`으로 분리했다. `inference.py`는 기존 추론 전용 기능, `model.py`는 `attach_pruning`과 학습/추론 모드 wrapper, `__init__.py`는 공개 export를 제공한다. `A3/inference_pruning.py`는 호환 import만 유지한다. 평가 CLI는 공개 API를 호출하고, 학습 모드의 `PrunedOutput`/보조 loss 계약은 [라이브러리 API](../library-api.md)를 따른다. A3 기본 평가는 여전히 추론 pruning이며, 신규 학습 모드는 재사용 기능이다.
+
 | 파일 | 현재/예정 | 책임 |
 |---|---|---|
 | `vitqat/models.py` | 기존 재사용 | 전달 config로 dense QAT 모델 생성 |
 | `vitqat/quantization.py` | 기존 유지 | QAT backbone 연산, CLS attention callback 추가 불필요 |
 | `vitqat/training.py` | 기존 재사용 | 원래 config와 split 기준 strict checkpoint load, evaluate |
-| `A3/inference_pruning.py` | 구현 | 학습된 query router, selector, 제거 feature cache, LLF, trace |
+| `A3/pruning/inference.py` | 구현 | 학습된 query router, selector, 제거 feature cache, LLF, trace |
+| `A3/pruning/model.py` | 구현 | 공개 attach API, train/eval 모드 분기, 보조 출력 및 query export |
+| `A3/inference_pruning.py` | 호환 | 이전 import 경로의 re-export |
 | `A3/eval_pruning.py` | 구현 | 두 checkpoint 검증, paired 평가와 결과 저장 |
 | `A3/metrics.py` | 확장 | router parameter/FLOPs, 실제 token trace, 전체 latency |
 | `A3/tests/test_inference_pruning.py` | 추가 | scorer 원본 동등성, CLS/Top-K/LLF/trace |
