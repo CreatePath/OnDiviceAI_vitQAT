@@ -48,7 +48,8 @@ class AttentionRouter(nn.Module):
             raise ValueError("Router must retain CLS and at least one patch")
         scores = attention.detach()[:, :, 0, :].mean(dim=1).clone()
         scores[:, 0] = torch.inf
-        order = torch.argsort(scores, dim=1, descending=True, stable=False)
+        # The default is stable=False; omitting it supports legacy ONNX export.
+        order = torch.argsort(scores, dim=1, descending=True)
         reordered = x.gather(1, order.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
         keep = x.shape[1] - self.pruning_rate
         return reordered[:, :keep], reordered[:, keep:]
