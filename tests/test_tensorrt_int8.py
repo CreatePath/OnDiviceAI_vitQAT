@@ -1,5 +1,6 @@
 """CPU numerical/export checks; these do not establish native TensorRT speed."""
 import copy
+import csv
 from types import SimpleNamespace
 
 import pytest
@@ -63,6 +64,64 @@ def test_native_requires_cuda(monkeypatch):
         require_tensorrt("cuda")
 
 
+def test_accuracy_keeps_partial_batch_and_uses_sample_weighted_loss():
+    from scripts.benchmark_tensorrt_int8 import evaluate_fixed_batch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    logits = torch.tensor([[4., 0.], [0., 4.], [1., 0.], [0., 1.], [3., 0.], [0., 3.], [1., 0.]])
+    labels = torch.tensor([0, 1, 0, 1, 1, 1, 1])
+    seen = []
+
+    def predict(padded):
+        seen.append(padded.clone())
+        return padded
+
+    batches = DataLoader(TensorDataset(logits, labels), batch_size=4)
+    result = evaluate_fixed_batch(predict, batches, 4)
+    assert result["evaluated_samples"] == 7
+    assert result["top1_acc"] == pytest.approx(100 * 5 / 7)
+    assert result["loss"] == pytest.approx(torch.nn.functional.cross_entropy(logits, labels).item())
+    assert len(seen) == 2 and all(batch.shape == (4, 2) for batch in seen)
+    assert torch.equal(seen[-1][-1], torch.zeros(2))
+    with pytest.raises(ValueError, match="Empty"):
+        evaluate_fixed_batch(predict, [], 4)
+
+
+def test_real_food_loader_and_split_validation(food_fixture):
+    from scripts.benchmark_tensorrt_int8 import evaluation_data
+    from vitqat.cli import parser
+    from vitqat.data import make_data
+
+    config = parser().parse_args(["--mode", "qat", "--output", "unused", "--image-size", "64",
+                                 "--data-root", str(food_fixture), "--device", "cpu"])
+    _, _, _, manifest = make_data(config)
+    options = SimpleNamespace(data_root=str(food_fixture), download=False, batch_size=32,
+                              workers=0, device="cpu", eval_split="test")
+    batches, restored = evaluation_data(config, {"split_hash": manifest["sha256"]}, options)
+    assert restored == manifest
+    assert len(batches.dataset) == 101
+    assert [len(target) for _, target in batches] == [32, 32, 32, 5]
+    assert next(iter(batches))[0].shape == (32, 3, 64, 64)
+    with pytest.raises(ValueError, match="split"):
+        evaluation_data(config, {"split_hash": "wrong"}, options)
+    with pytest.raises(ValueError, match="split"):
+        evaluation_data(config, {}, options)
+
+
+def test_csv_keeps_accuracy_and_timing_separate(tmp_path):
+    from scripts.benchmark_tensorrt_int8 import write_metrics_csv
+
+    report = dict(eval_split="test", model_structure=dict(params=100, gflops=0.1, tokens_per_block=[17, 8]),
+                  source_qat=dict(top1_acc=80.0, evaluated_samples=101),
+                  w2_int8=dict(top1_acc=79.0, evaluated_samples=101, gpu_compute_ms_median=2.0))
+    write_metrics_csv(tmp_path, report)
+    with (tmp_path / "metrics.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["gpu_compute_ms_median"] == ""
+    assert rows[1]["top1_acc"] == "79.0" and rows[1]["evaluated_samples"] == "101"
+    assert rows[1]["tokens_per_block"] == "[17, 8]"
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Native TensorRT requires CUDA PyTorch")
 @pytest.mark.parametrize("quantized", [False, True])
 def test_native_python_execution(tmp_path, quantized):
@@ -85,11 +144,15 @@ def test_native_python_execution(tmp_path, quantized):
         reference = layer(x)
     export_onnx(layer, x, tmp_path / "native.onnx")
     options = SimpleNamespace(device="cuda", warmup_ms=0, duration=0, iterations=2)
-    result = benchmark_engine(require_tensorrt("cuda"), tmp_path, "native", x, reference, options)
+    from torch.utils.data import DataLoader, TensorDataset
+    batches = DataLoader(TensorDataset(x[:7], reference[:7].argmax(-1)), batch_size=16)
+    result = benchmark_engine(require_tensorrt("cuda"), tmp_path, "native", x, reference, options, batches)
     assert result["samples"] == 2
     assert result["synthetic_native_vs_reference_max_abs_error"] <= tolerance
     assert (tmp_path / "native.engine").stat().st_size > 0
     assert (tmp_path / "native.layers.json").is_file()
+    assert result["evaluated_samples"] == 7 and result["top1_acc"] == 100
+    assert result["storage_engine_bytes"] > 0
 
 
 @pytest.mark.parametrize("cropr,llf,scope", [
@@ -146,6 +209,9 @@ def test_full_export_and_onnx_runtime(tmp_path, cropr, llf, scope):
         destination = tmp_path / "cli-export"
         report = main(["--checkpoint", str(checkpoint), "--output", str(destination), "--export-only"])
         assert report["engine_execution"] == "not_run"
+        assert report["accuracy_evaluation"] == "not_requested"
+        assert report["model_structure"]["gflops"] > 0
+        assert report["model_structure"]["params"] == sum(p.numel() for p in source.parameters())
         assert len(report["attention_onnx"]) == 24
         assert (destination / "fp32_master.onnx").is_file()
         assert (destination / "images.bin").stat().st_size == x.numel() * 4

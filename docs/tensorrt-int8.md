@@ -101,15 +101,66 @@ PyTorch CUDA tensor의 주소를 TensorRT에 연결하고 같은 CUDA stream에�
 INT8 행렬곱을 입증할 수 없다. FP32 fallback 또는 정밀도가 불명확한 fused layer가 있으면
 "전체 INT8 attention 검증 완료"로 표시하지 않는다. `report.json`도 이 판단을 자동 통과시키지 않는다.
 
-## 정확도 평가와 검증 범위
+## 실제 데이터 정확도와 실험 지표
 
-`convert_tensorrt_int8(qat_model)`은 CPU PyTorch 수치 참조 모델을 반환한다.
-기존 `vitqat.training.evaluate`와 validation loader에 연결해 원본 QAT와 비교할 수 있다.
-이 참조 모델 자체는 정수 커널로 가속되지 않는다. 최종 배포 정확도는 실제 엔진으로 평가해야 한다.
-합성 입력의 top-1 일치율은 Food-101 정확도를 대체하지 않는다.
+`--data-root`를 추가하면 같은 Food-101 split에서 원본 affine QAT, TensorRT FP32,
+TensorRT INT8의 실제 Top-1 accuracy와 loss를 함께 측정한다.
+
+```bash
+python -m scripts.benchmark_tensorrt_int8 \
+  --checkpoint runs/w2a8/best.pt \
+  --output runs/tensorrt_int8_eval \
+  --data-root data --eval-split test \
+  --batch-size 1 --workers 4
+```
+
+`data`는 `food-101/`을 포함하는 상위 디렉터리다. 기존 학습과 같은 전처리·클래스 순서·분할을
+사용하며, 체크포인트의 `split_hash`가 없거나 복원된 분할과 다르면 평가를 거부한다.
+검증 split으로 확인하려면 `--eval-split val`을 사용한다. 데이터 다운로드는 명시적으로
+`--download`를 붙였을 때만 수행한다.
+
+평가 데이터는 calibration이나 학습에 사용하지 않는다. 선택한 split 전체를 평가하며,
+마지막 불완전 배치는 엔진의 고정 batch 크기까지 0으로 채우고 실제 샘플만 집계한다.
+정확도 평가의 데이터 로딩·전송·loss 계산은 inference computation time 측정 구간에서 제외한다.
+`--batch-size`는 엔진 측정과 정확도 평가에 공통으로 적용된다.
+
+결과는 `report.json`과 backend별 행으로 정리된 `metrics.csv`에 저장한다.
+분할 재현 정보는 `split.json`에 저장한다.
+
+| 실험 지표 | 결과 필드와 의미 |
+| --- | --- |
+| Top-1 accuracy (%) | `source_qat`, `fp32_master`, `w2_int8` 각각의 `top1_acc` |
+| Cross-entropy loss / 평가 수 | 각 backend의 `loss`, `evaluated_samples`. 배치 평균이 아닌 샘플 수로 가중한 전체 평균 |
+| 정확도 감소 (pp) | `int8_top1_drop_vs_source_qat_pp`, `int8_top1_drop_vs_trt_fp32_pp`. 기준 정확도에서 INT8 정확도를 빼며, 음수도 보존 |
+| Inference computation time | `gpu_compute_ms_mean/median/p95`. GPU에 입력이 준비된 상태의 배치 전체 forward; E2E latency 아님 |
+| 연산 시간 기준 처리량 | `compute_only_images_per_second`: batch size / 평균 GPU 시간. 전처리·전송을 포함한 서비스 처리량 아님 |
+| GFLOPs | `model_structure.gflops`: 이미지 1장, MAC=2, 기존 실험의 Conv/Linear·attention·Cropr QK 계산 규칙 |
+| Params | `model_structure.params`, `inference_params`: 전체 학습 파라미터와 보조 분기를 제외한 추론 파라미터 |
+| 저장 크기 | `storage_engine_bytes`, `storage_onnx_bytes`: 각 backend의 실제 파일 크기 |
+| Token pruning ratio | `model_structure.token_pruning_ratio`, `final_token_pruning_ratio`, block별 token 수 |
+| 속도·크기 비교 | `gpu_compute_speedup_vs_trt_fp32`, `engine_size_ratio_fp32_to_int8`. 모두 FP32 / INT8 비율 |
+
+구조 지표는 기존 `measure_vit` 계산을 재사용한다. 같은 구조의 FP32/INT8에 공통이며
+TensorRT kernel의 실측 연산량이 아니다. bias/norm/softmax/sorting/quantization 비용은 GFLOPs에서 제외한다.
+파라미터 수와 GFLOPs는 양자화 비트 수만 줄여도 감소하지 않는다.
+엔진 파일에는 실행 코드와 메타데이터 등이 포함될 수 있으므로 크기를 순수 가중치 payload로 해석하지 않는다.
+기존 2비트 packed payload 추정치를 INT8 엔진의 실제 저장 크기로 대체해 보고하지 않는다.
+
+정확도는 `source_qat`가 기존 QAT 대비 손실을 확인하는 기준이다. `fp32_master`는 QAT 체크포인트의
+master 가중치로 만든 모델이므로 별도로 학습한 FP32 모델과의 정확도 비교를 대체하지 않는다.
+합성 입력의 `synthetic_top1_agreement`도 실제 데이터의 `top1_acc`와 다른 지표다.
+
+`--data-root`를 생략하면 기존처럼 합성 입력으로 속도만 측정하고,
+`accuracy_evaluation=not_requested`로 기록한다. `--export-only`는 native 정확도 평가와 함께 사용할 수 없다.
+GPU 메모리 사용량·전력·에너지·E2E latency는 현재 측정하지 않는다.
+
+## 검증 범위
 
 테스트는 W2 값 보존과 원본 불변성, 잘못된 상태 거부, Cropr off/on 및 LLF/scope 조합,
 ONNX checker, attention 입력의 Q/DQ 연결, ONNX Runtime 출력, CLI export를 검증한다.
+정확도 경로는 실제 Food101 loader를 통과하는 생성 이미지 fixture로 split 검증을 확인하고,
+부분 배치 padding 제외·loss 가중 평균·CSV 지표 분리를 검사한다. native 테스트도 실제 엔진에
+부분 배치를 넣어 평가하도록 확장했다.
 12개 블록을 거치며 런타임 간 작은 행렬곱 오차가 양자화 경계를 넘을 수 있어
 전체 출력 검증은 bitwise 비교가 아니라 최대 8 output bins 및 상대 L2 5% 미만의 drift 검사다.
 이 한계는 학습된 모델의 허용 정확도 기준을 뜻하지 않는다.
@@ -127,6 +178,7 @@ RTX 4090 속도 및 Food-101 정확도는 아직 검증하지 않았다. 가속 
 Python API 실행 경로에는 FP32/INT8 엔진을 실제로 생성·실행하는 native 테스트를 추가했다.
 CUDA PyTorch 또는 TensorRT가 없는 환경에서는 해당 테스트를 건너뛰며, 통과로 간주하지 않는다.
 Python API 전환 후 PyTorch 2.3 CPU에서 관련 테스트는 9 passed, native 2 skipped였다.
+정확도·실험 지표 추가 후 같은 환경에서 관련 테스트는 12 passed, native 2 skipped였다.
 
 참고: [TensorRT explicit quantization](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/inference-library/work-quantized-types.html),
 [엔진 검사 도구](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/engine-tools.html),

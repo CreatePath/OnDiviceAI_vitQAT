@@ -1,6 +1,7 @@
 """Export W2-valued INT8 ONNX and benchmark with the TensorRT Python API."""
 import argparse
 import copy
+import csv
 import json
 import math
 from pathlib import Path
@@ -11,8 +12,10 @@ import torch
 
 from vitqat.cli import parser as training_parser
 from vitqat.models import build_model
+from vitqat.data import loader, make_data
+from vitqat.metrics import measure_vit
 from vitqat.tensorrt_int8 import audit_attention_qdq, convert_tensorrt_int8, export_onnx
-from vitqat.training import seed_all
+from vitqat.training import evaluate, seed_all
 
 
 def summarize_results(times, logits, reference):
@@ -21,10 +24,65 @@ def summarize_results(times, logits, reference):
         raise ValueError("Missing or invalid native GPU timings")
     if logits.shape != reference.shape or not torch.isfinite(logits).all():
         raise ValueError("Invalid native logits shape or nonfinite values")
-    return dict(gpu_compute_ms_median=statistics.median(times),
+    return dict(gpu_compute_ms_mean=statistics.mean(times), gpu_compute_ms_median=statistics.median(times),
                 gpu_compute_ms_p95=times[math.ceil(len(times) * 0.95) - 1], samples=len(times),
                 synthetic_native_vs_reference_max_abs_error=(logits - reference).abs().max().item(),
                 synthetic_native_vs_reference_top1_agreement=(logits.argmax(-1) == reference.argmax(-1)).float().mean().item())
+
+
+@torch.inference_mode()
+def evaluate_fixed_batch(predict, batches, batch_size):
+    """Evaluate a fixed-shape engine without dropping or counting padded samples."""
+    loss, correct, samples = 0.0, 0, 0
+    for images, target in batches:
+        count = images.shape[0]
+        if not 0 < count <= batch_size:
+            raise ValueError("Evaluation batch must fit the fixed engine batch size")
+        if count < batch_size:
+            images = torch.cat([images, images.new_zeros((batch_size - count, *images.shape[1:]))])
+        output = predict(images)
+        if output.ndim != 2 or output.shape[0] != batch_size or not torch.isfinite(output).all():
+            raise ValueError("Invalid classification logits from engine")
+        output = output[:count]
+        loss += torch.nn.functional.cross_entropy(output, target, reduction="sum").item()
+        correct += (output.argmax(-1) == target).sum().item()
+        samples += count
+    if not samples:
+        raise ValueError("Empty evaluation dataset")
+    return dict(top1_acc=100.0 * correct / samples, loss=loss / samples, evaluated_samples=samples)
+
+
+def evaluation_data(config, checkpoint, options):
+    config = copy.copy(config)
+    config.data_root, config.download = options.data_root, options.download
+    config.batch_size, config.workers, config.device = options.batch_size, options.workers, options.device
+    _, val, test, manifest = make_data(config)
+    if checkpoint.get("split_hash") != manifest["sha256"]:
+        raise ValueError("Checkpoint data split does not match; use the original Food-101 data and split")
+    dataset = test if options.eval_split == "test" else val
+    return loader(dataset, config), manifest
+
+
+def structure_metrics(model, image_size):
+    measured = measure_vit(model, image_size, "cpu", warmup=0, repeats=1)
+    fields = ("params", "inference_params", "gflops", "flops_convention", "token_pruning_ratio",
+              "final_token_pruning_ratio", "pruning_ratio_definition", "tokens_per_block", "tokens_after_pruning")
+    return {field: measured[field] for field in fields}
+
+
+def write_metrics_csv(output, report):
+    rows = []
+    for name in ("source_qat", "fp32_master", "w2_int8"):
+        if name in report:
+            row = dict(backend=name, eval_split=report.get("eval_split"),
+                       **report["model_structure"], **report[name])
+            rows.append({key: json.dumps(value) if isinstance(value, list) else value for key, value in row.items()})
+    if rows:
+        fields = list(dict.fromkeys(key for row in rows for key in row))
+        with (output / "metrics.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
 
 
 def require_tensorrt(device):
@@ -41,7 +99,7 @@ def require_tensorrt(device):
 
 
 @torch.inference_mode()
-def benchmark_engine(trt, output, name, x, reference, options):
+def benchmark_engine(trt, output, name, x, reference, options, batches=None):
     """Build once, bind PyTorch CUDA buffers, then time serialized forwards."""
     with torch.cuda.device(options.device):
         logger = trt.Logger(trt.Logger.WARNING)
@@ -109,7 +167,20 @@ def benchmark_engine(trt, output, name, x, reference, options):
             json.dumps([{"computeMs": value} for value in times]), encoding="utf-8")
         (output / f"{name}.outputs.json").write_text(json.dumps([
             {"name": "logits", "shape": list(logits.shape), "values": logits.flatten().tolist()}]), encoding="utf-8")
-        return summarize_results(times, logits, reference)
+        result = summarize_results(times, logits, reference)
+        result.update(storage_engine_bytes=(output / f"{name}.engine").stat().st_size,
+                      storage_onnx_bytes=(output / f"{name}.onnx").stat().st_size,
+                      compute_only_images_per_second=1000 * x.shape[0] / result["gpu_compute_ms_mean"])
+        if batches is not None:
+            print(f"Evaluating {name} on real data (outside timing)", flush=True)
+
+            def predict(images):
+                buffers["images"].copy_(images)
+                launch()
+                return buffers["logits"].cpu()
+
+            result.update(evaluate_fixed_batch(predict, batches, x.shape[0]))
+        return result
 
 
 def main(argv=None):
@@ -119,18 +190,29 @@ def main(argv=None):
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--export-only", action="store_true", help="CPU export; no TensorRT required")
     parser.add_argument("--device", default="cuda", help="CUDA device, e.g. cuda:0")
+    parser.add_argument("--data-root", help="Food-101 root; enables real-data accuracy evaluation")
+    parser.add_argument("--eval-split", choices=["val", "test"], default="test")
+    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--download", action="store_true")
     parser.add_argument("--warmup-ms", type=int, default=1000)
     parser.add_argument("--duration", type=int, default=10, help="Minimum benchmark seconds per engine")
     parser.add_argument("--iterations", type=int, default=100)
     options = parser.parse_args(argv)
     if options.batch_size < 1 or options.warmup_ms < 0 or options.duration < 1 or options.iterations < 1:
         parser.error("batch-size/duration/iterations must be positive; warmup-ms must be nonnegative")
+    if options.workers < 0:
+        parser.error("workers must be nonnegative")
+    if options.export_only and options.data_root:
+        parser.error("--data-root evaluates native engines; omit --export-only")
+    if options.download and not options.data_root:
+        parser.error("--download requires --data-root")
     trt = None if options.export_only else require_tensorrt(options.device)
     checkpoint = torch.load(options.checkpoint, map_location="cpu", weights_only=True)
     config = training_parser().parse_args(["--mode", "qat", "--output", "unused"])
     vars(config).update(checkpoint["config"])
     if config.mode != "qat" or (config.weight_bits, config.activation_bits) != (2, 8):
         parser.error("A calibrated W2A8 QAT checkpoint is required")
+    batches, manifest = evaluation_data(config, checkpoint, options) if options.data_root else (None, None)
     seed_all(config.seed)
     source = build_model(config)
     source.load_state_dict(checkpoint["model"], strict=True)
@@ -154,6 +236,9 @@ def main(argv=None):
                   qat_scope=config.qat_scope,
                   synthetic_logit_max_abs_error=(expected - actual).abs().max().item(),
                   synthetic_top1_agreement=(expected.argmax(-1) == actual.argmax(-1)).float().mean().item(),
+                  model_structure=structure_metrics(source, config.image_size),
+                  structure_note="Source architecture, per image, not measured TensorRT kernel FLOPs; quantization does not reduce arithmetic count",
+                  accuracy_evaluation="not_requested" if batches is None else "pending",
                   engine_execution="not_run", kernel_precision_verified=False,
                   note="Synthetic checks are not Food-101 accuracy. Q/DQ coverage is not proof of INT8 kernels.")
     for name, net in (("fp32_master", fp32), ("w2_int8", converted)):
@@ -171,6 +256,19 @@ def main(argv=None):
     x.numpy().tofile(output / "images.bin")
     report_path = output / "report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if batches is not None:
+        (output / "split.json").write_text(json.dumps(manifest), encoding="utf-8")
+        report.update(eval_split=options.eval_split, split_hash=manifest["sha256"],
+                      data_root=str(options.data_root),
+                      accuracy_note="FP32 master shares QAT master weights; not a separately trained FP32 baseline")
+        print("Evaluating original affine QAT on the same data", flush=True)
+        source_metrics = evaluate(source.to(options.device), batches, options.device)
+        report["source_qat"] = dict(top1_acc=source_metrics["top1_acc"], loss=source_metrics["loss"],
+                                    evaluated_samples=source_metrics["samples"])
+        source.cpu()
+        with torch.cuda.device(options.device):
+            torch.cuda.empty_cache()
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     if not options.export_only:
         report.update(backend="tensorrt_python", backend_version=trt.__version__,
                       device=torch.cuda.get_device_name(options.device), cuda_version=torch.version.cuda,
@@ -182,7 +280,8 @@ def main(argv=None):
             report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
             print(f"Building/benchmarking {name} with TensorRT Python API", flush=True)
             try:
-                report[name] = benchmark_engine(trt, output, name, x, references[name], options)
+                report[name] = benchmark_engine(trt, output, name, x, references[name], options, batches)
+                report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
             except Exception as error:
                 report["engine_execution"] = f"failed_{name}"
                 report["error"] = str(error)
@@ -190,8 +289,18 @@ def main(argv=None):
                 raise
         report["gpu_compute_speedup_vs_trt_fp32"] = (
             report["fp32_master"]["gpu_compute_ms_median"] / report["w2_int8"]["gpu_compute_ms_median"])
+        report["engine_size_ratio_fp32_to_int8"] = (
+            report["fp32_master"]["storage_engine_bytes"] / report["w2_int8"]["storage_engine_bytes"])
+        if batches is not None:
+            counts = [report[name]["evaluated_samples"] for name in ("source_qat", "fp32_master", "w2_int8")]
+            if any(count != len(batches.dataset) for count in counts):
+                raise RuntimeError("Accuracy evaluation did not cover the complete selected split")
+            report["int8_top1_drop_vs_source_qat_pp"] = report["source_qat"]["top1_acc"] - report["w2_int8"]["top1_acc"]
+            report["int8_top1_drop_vs_trt_fp32_pp"] = report["fp32_master"]["top1_acc"] - report["w2_int8"]["top1_acc"]
+            report["accuracy_evaluation"] = "completed"
         report["engine_execution"] = "completed; inspect layer reports to confirm INT8 attention kernels"
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        write_metrics_csv(output, report)
     print(json.dumps(report, indent=2))
     return report
 
