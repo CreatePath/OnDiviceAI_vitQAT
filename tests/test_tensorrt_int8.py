@@ -95,7 +95,7 @@ def test_real_food_loader_and_split_validation(food_fixture):
     config = parser().parse_args(["--mode", "qat", "--output", "unused", "--image-size", "64",
                                  "--data-root", str(food_fixture), "--device", "cpu"])
     _, _, _, manifest = make_data(config)
-    options = SimpleNamespace(data_root=str(food_fixture), download=False, batch_size=32,
+    options = SimpleNamespace(data_root=str(food_fixture), download=False, batch_size=1, eval_batch_size=32,
                               workers=0, device="cpu", eval_split="test")
     batches, restored = evaluation_data(config, {"split_hash": manifest["sha256"]}, options)
     assert restored == manifest
@@ -106,6 +106,50 @@ def test_real_food_loader_and_split_validation(food_fixture):
         evaluation_data(config, {"split_hash": "wrong"}, options)
     with pytest.raises(ValueError, match="split"):
         evaluation_data(config, {}, options)
+
+
+def test_timing_has_exact_repeat_count(monkeypatch):
+    from scripts.benchmark_tensorrt_int8 import time_forwards
+
+    launches, measurements = [], []
+    event = SimpleNamespace(record=lambda stream: None, synchronize=lambda: None,
+                            elapsed_time=lambda end: measurements.append(1.0) or 1.0)
+    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
+    times = time_forwards(lambda: launches.append(1), SimpleNamespace(synchronize=lambda: None), 3, 7)
+    assert len(launches) == 1 + 3 + 7  # initial execution + warmup + timed iterations
+    assert times == [1.0] * 7 and len(measurements) == 7
+
+
+@pytest.mark.parametrize("eval_batch_size", [1, 4])
+def test_separate_batch_routing_does_not_replace_timing(monkeypatch, tmp_path, eval_batch_size):
+    from scripts import benchmark_tensorrt_int8 as runner
+
+    calls, exports = [], []
+    batches = object()
+
+    def engine(trt, output, name, x, reference, options, data=None, *, measure=True):
+        calls.append((name, x.shape[0], data, measure))
+        result = dict(storage_engine_bytes=100 * x.shape[0], storage_onnx_bytes=50 * x.shape[0])
+        if measure:
+            result.update(gpu_compute_ms_median=1.5, samples=7)
+        if data is not None:
+            result.update(top1_acc=75.0, loss=0.5, evaluated_samples=11)
+        return result
+
+    monkeypatch.setattr(runner, "benchmark_engine", engine)
+    monkeypatch.setattr(runner, "export_onnx", lambda model, x, path: exports.append(x.shape[0]))
+    result = runner.run_backend(None, tmp_path, "w2_int8", None, torch.zeros(1, 3, 8, 8),
+                                torch.zeros(1, 101), SimpleNamespace(eval_batch_size=eval_batch_size), batches)
+    assert result["timing_batch_size"] == 1 and result["eval_batch_size"] == eval_batch_size
+    assert result["samples"] == 7 and result["gpu_compute_ms_median"] == 1.5
+    assert result["storage_engine_bytes"] == 100
+    assert result["eval_storage_engine_bytes"] == 100 * eval_batch_size
+    assert result["evaluated_samples"] == 11 and result["top1_acc"] == 75.0
+    if eval_batch_size == 1:
+        assert calls == [("w2_int8", 1, batches, True)] and not exports
+    else:
+        assert calls == [("w2_int8", 1, None, True), ("w2_int8_eval_b4", 4, batches, False)]
+        assert exports == [4]
 
 
 def test_csv_keeps_accuracy_and_timing_separate(tmp_path):
@@ -126,7 +170,7 @@ def test_csv_keeps_accuracy_and_timing_separate(tmp_path):
 @pytest.mark.parametrize("quantized", [False, True])
 def test_native_python_execution(tmp_path, quantized):
     pytest.importorskip("tensorrt")
-    from scripts.benchmark_tensorrt_int8 import benchmark_engine, require_tensorrt
+    from scripts.benchmark_tensorrt_int8 import run_backend, require_tensorrt
 
     torch.manual_seed(42)
     x = torch.randn(16, 32)
@@ -142,17 +186,20 @@ def test_native_python_execution(tmp_path, quantized):
         tolerance = 1e-4
     with torch.no_grad():
         reference = layer(x)
-    export_onnx(layer, x, tmp_path / "native.onnx")
-    options = SimpleNamespace(device="cuda", warmup_ms=0, duration=0, iterations=2)
+    export_onnx(layer, x[:1], tmp_path / "native.onnx")
+    options = SimpleNamespace(device="cuda", warmup=0, iterations=2, eval_batch_size=4)
     from torch.utils.data import DataLoader, TensorDataset
-    batches = DataLoader(TensorDataset(x[:7], reference[:7].argmax(-1)), batch_size=16)
-    result = benchmark_engine(require_tensorrt("cuda"), tmp_path, "native", x, reference, options, batches)
+    batches = DataLoader(TensorDataset(x[:7], reference[:7].argmax(-1)), batch_size=4)
+    result = run_backend(require_tensorrt("cuda"), tmp_path, "native", layer, x[:1], reference[:1], options, batches)
     assert result["samples"] == 2
     assert result["synthetic_native_vs_reference_max_abs_error"] <= tolerance
     assert (tmp_path / "native.engine").stat().st_size > 0
     assert (tmp_path / "native.layers.json").is_file()
     assert result["evaluated_samples"] == 7 and result["top1_acc"] == 100
     assert result["storage_engine_bytes"] > 0
+    assert result["timing_batch_size"] == 1 and result["eval_batch_size"] == 4
+    assert (tmp_path / "native_eval_b4.engine").is_file()
+    assert not (tmp_path / "native_eval_b4.times.json").exists()
 
 
 @pytest.mark.parametrize("cropr,llf,scope", [

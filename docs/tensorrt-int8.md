@@ -62,7 +62,7 @@ python -m scripts.benchmark_tensorrt_int8 \
 ```
 
 `fp32_master.onnx`, `w2_int8.onnx`, 동일한 입력을 담은 `images.bin`, `report.json`이 생성된다.
-batch와 이미지 크기는 고정이다. 다른 batch로 실행하려면 해당 batch로 다시 export/build한다.
+이미지 크기와 엔진별 batch는 고정이다. 시간 측정용 export의 batch는 항상 1이다.
 `fp32_master`는 같은 체크포인트의 master parameter를 사용한 latency 기준선이며,
 별도로 학습된 FP32 정확도 기준선은 아니다.
 
@@ -72,10 +72,14 @@ batch와 이미지 크기는 고정이다. 다른 batch로 실행하려면 해�
 python -m scripts.benchmark_tensorrt_int8 \
   --checkpoint runs/w2a8/best.pt \
   --output runs/tensorrt_int8 --batch-size 1 \
-  --warmup-ms 1000 --duration 10 --iterations 100
+  --warmup 20 --iterations 100
 ```
 
 두 ONNX를 TensorRT Python API로 각각 엔진으로 만들고 동일 입력으로 측정한다.
+시간 측정은 **합성 입력 한 장(batch=1)만 반복 사용**한다. 최초 초기화 실행 1회와 warmup 20회를
+제외하고 정확히 100회 관측하며, 전체 데이터셋을 돌며 시간을 재지 않는다.
+`--iterations`로 관측 횟수를 바꿀 수 있다. 최소 10초 실행 조건은 없으며,
+이전 `--warmup-ms`/`--duration` 옵션은 `--warmup`/`--iterations`로 대체했다.
 GPU 선택은 `--device cuda:0` 등으로 지정한다. 빌드 진단은 터미널에 출력하며,
 실패 시 report에 오류를 기록하고 종료한다. 다른 backend로 fallback하지 않는다.
 명시적 Q/DQ를 사용하며 별도의 무작위 calibration은 수행하지 않는다.
@@ -83,7 +87,7 @@ FP16도 켜지 않는다. 실제 INT8로 선택되지 않은 연산은 FP32로 �
 
 - `*.engine`: 해당 GPU/TensorRT 환경용 엔진.
 - `*.layers.json`: 실제 엔진 레이어, tensor format/type, tactic 정보.
-- `*.times.json`: warmup 이후 GPU 측정 원자료.
+- `*.times.json`: batch=1에서 정확히 `--iterations`개를 수집한 GPU 측정 원자료.
 - `*.outputs.json`: 합성 입력에 대한 실제 엔진 logits.
 - `report.json`: 변환 전후 합성 logits 차이, ONNX attention Q/DQ 검사,
   TensorRT/CUDA 버전, 장치, 측정 설정, native/reference logits 차이, GPU median/p95와 속도비.
@@ -111,7 +115,8 @@ python -m scripts.benchmark_tensorrt_int8 \
   --checkpoint runs/w2a8/best.pt \
   --output runs/tensorrt_int8_eval \
   --data-root data --eval-split test \
-  --batch-size 1 --workers 4
+  --eval-batch-size 32 --workers 4 \
+  --warmup 20 --iterations 100
 ```
 
 `data`는 `food-101/`을 포함하는 상위 디렉터리다. 기존 학습과 같은 전처리·클래스 순서·분할을
@@ -122,7 +127,16 @@ python -m scripts.benchmark_tensorrt_int8 \
 평가 데이터는 calibration이나 학습에 사용하지 않는다. 선택한 split 전체를 평가하며,
 마지막 불완전 배치는 엔진의 고정 batch 크기까지 0으로 채우고 실제 샘플만 집계한다.
 정확도 평가의 데이터 로딩·전송·loss 계산은 inference computation time 측정 구간에서 제외한다.
-`--batch-size`는 엔진 측정과 정확도 평가에 공통으로 적용된다.
+시간 측정 batch는 항상 1이고, 정확도 평가 batch는 `--eval-batch-size`(기본 32)로 별도 지정한다.
+원본 QAT와 TensorRT FP32/INT8 모두 같은 평가 batch를 사용한다.
+GPU 메모리가 부족하면 평가 batch만 16이나 8로 줄인다. `--batch-size`는 이전 명령 호환용이며 1만 허용한다.
+
+평가 batch가 1과 다르면 `{backend}_eval_b32.onnx/.engine/.layers.json`처럼 별도의 고정 batch
+엔진을 만든다. 평가용 엔진에는 warmup/반복 시간 측정을 수행하지 않고 정확도만 평가한다.
+따라서 최초 실행의 엔진 빌드 시간은 늘어날 수 있지만, 데이터 평가를 batch=1로 수행하지 않는다.
+평가 batch가 1이면 시간 측정 엔진을 그대로 사용해 중복 빌드를 피한다.
+TensorRT는 batch별 최적화로 작은 수치 차이가 생길 수 있으므로, 큰 batch의 정확도를 batch=1
+배포 엔진의 정확도와 완전히 같다고 간주하면 안 된다. 배포 엔진 정확도를 확인할 때는 `--eval-batch-size 1`을 쓴다.
 
 결과는 `report.json`과 backend별 행으로 정리된 `metrics.csv`에 저장한다.
 분할 재현 정보는 `split.json`에 저장한다.
@@ -137,6 +151,7 @@ python -m scripts.benchmark_tensorrt_int8 \
 | GFLOPs | `model_structure.gflops`: 이미지 1장, MAC=2, 기존 실험의 Conv/Linear·attention·Cropr QK 계산 규칙 |
 | Params | `model_structure.params`, `inference_params`: 전체 학습 파라미터와 보조 분기를 제외한 추론 파라미터 |
 | 저장 크기 | `storage_engine_bytes`, `storage_onnx_bytes`: 각 backend의 실제 파일 크기 |
+| 측정/평가 설정 | `timing_batch_size=1`, `eval_batch_size`, `timing_engine_name`, `eval_engine_name` |
 | Token pruning ratio | `model_structure.token_pruning_ratio`, `final_token_pruning_ratio`, block별 token 수 |
 | 속도·크기 비교 | `gpu_compute_speedup_vs_trt_fp32`, `engine_size_ratio_fp32_to_int8`. 모두 FP32 / INT8 비율 |
 
@@ -144,6 +159,8 @@ python -m scripts.benchmark_tensorrt_int8 \
 TensorRT kernel의 실측 연산량이 아니다. bias/norm/softmax/sorting/quantization 비용은 GFLOPs에서 제외한다.
 파라미터 수와 GFLOPs는 양자화 비트 수만 줄여도 감소하지 않는다.
 엔진 파일에는 실행 코드와 메타데이터 등이 포함될 수 있으므로 크기를 순수 가중치 payload로 해석하지 않는다.
+기본 `storage_*` 및 크기 비율은 batch=1 시간 측정 엔진 기준이다. 평가용 엔진 크기는
+`eval_storage_engine_bytes`, `eval_storage_onnx_bytes`에 별도 기록한다.
 기존 2비트 packed payload 추정치를 INT8 엔진의 실제 저장 크기로 대체해 보고하지 않는다.
 
 정확도는 `source_qat`가 기존 QAT 대비 손실을 확인하는 기준이다. `fp32_master`는 QAT 체크포인트의
@@ -161,6 +178,7 @@ ONNX checker, attention 입력의 Q/DQ 연결, ONNX Runtime 출력, CLI export�
 정확도 경로는 실제 Food101 loader를 통과하는 생성 이미지 fixture로 split 검증을 확인하고,
 부분 배치 padding 제외·loss 가중 평균·CSV 지표 분리를 검사한다. native 테스트도 실제 엔진에
 부분 배치를 넣어 평가하도록 확장했다.
+시간 측정의 정확한 반복 횟수와 batch=1/평가 batch의 분리, 같은 batch일 때 엔진 재사용도 검사한다.
 12개 블록을 거치며 런타임 간 작은 행렬곱 오차가 양자화 경계를 넘을 수 있어
 전체 출력 검증은 bitwise 비교가 아니라 최대 8 output bins 및 상대 L2 5% 미만의 drift 검사다.
 이 한계는 학습된 모델의 허용 정확도 기준을 뜻하지 않는다.
@@ -179,6 +197,7 @@ Python API 실행 경로에는 FP32/INT8 엔진을 실제로 생성·실행하�
 CUDA PyTorch 또는 TensorRT가 없는 환경에서는 해당 테스트를 건너뛰며, 통과로 간주하지 않는다.
 Python API 전환 후 PyTorch 2.3 CPU에서 관련 테스트는 9 passed, native 2 skipped였다.
 정확도·실험 지표 추가 후 같은 환경에서 관련 테스트는 12 passed, native 2 skipped였다.
+시간/정확도 batch 분리 후 관련 테스트는 15 passed, native 2 skipped였다.
 
 참고: [TensorRT explicit quantization](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/inference-library/work-quantized-types.html),
 [엔진 검사 도구](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/engine-tools.html),

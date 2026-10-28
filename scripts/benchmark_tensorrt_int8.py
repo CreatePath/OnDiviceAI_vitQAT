@@ -6,7 +6,6 @@ import json
 import math
 from pathlib import Path
 import statistics
-import time
 
 import torch
 
@@ -55,7 +54,7 @@ def evaluate_fixed_batch(predict, batches, batch_size):
 def evaluation_data(config, checkpoint, options):
     config = copy.copy(config)
     config.data_root, config.download = options.data_root, options.download
-    config.batch_size, config.workers, config.device = options.batch_size, options.workers, options.device
+    config.batch_size, config.workers, config.device = options.eval_batch_size, options.workers, options.device
     _, val, test, manifest = make_data(config)
     if checkpoint.get("split_hash") != manifest["sha256"]:
         raise ValueError("Checkpoint data split does not match; use the original Food-101 data and split")
@@ -98,8 +97,25 @@ def require_tensorrt(device):
     return trt
 
 
+def time_forwards(launch, stream, warmup, iterations):
+    launch()  # First execution and pending input transfer are not measured.
+    stream.synchronize()
+    for _ in range(warmup):
+        launch()
+        stream.synchronize()
+    start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    times = []
+    for _ in range(iterations):
+        start.record(stream)
+        launch()
+        end.record(stream)
+        end.synchronize()
+        times.append(start.elapsed_time(end))
+    return times
+
+
 @torch.inference_mode()
-def benchmark_engine(trt, output, name, x, reference, options, batches=None):
+def benchmark_engine(trt, output, name, x, reference, options, batches=None, *, measure=True):
     """Build once, bind PyTorch CUDA buffers, then time serialized forwards."""
     with torch.cuda.device(options.device):
         logger = trt.Logger(trt.Logger.WARNING)
@@ -147,30 +163,18 @@ def benchmark_engine(trt, output, name, x, reference, options, batches=None):
             if not context.execute_async_v3(stream.cuda_stream):
                 raise RuntimeError(f"{name}: TensorRT execution failed")
 
-        launch()  # First execution and input transfer are outside measurements.
-        stream.synchronize()
-        deadline = time.perf_counter() + options.warmup_ms / 1000
-        while time.perf_counter() < deadline:
-            launch()
-            stream.synchronize()
-        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        times = []
-        deadline = time.perf_counter() + options.duration
-        while len(times) < options.iterations or time.perf_counter() < deadline:
-            start.record(stream)
-            launch()
-            end.record(stream)
-            end.synchronize()
-            times.append(start.elapsed_time(end))
-        logits = buffers["logits"].cpu()
-        (output / f"{name}.times.json").write_text(
-            json.dumps([{"computeMs": value} for value in times]), encoding="utf-8")
-        (output / f"{name}.outputs.json").write_text(json.dumps([
-            {"name": "logits", "shape": list(logits.shape), "values": logits.flatten().tolist()}]), encoding="utf-8")
-        result = summarize_results(times, logits, reference)
-        result.update(storage_engine_bytes=(output / f"{name}.engine").stat().st_size,
-                      storage_onnx_bytes=(output / f"{name}.onnx").stat().st_size,
-                      compute_only_images_per_second=1000 * x.shape[0] / result["gpu_compute_ms_mean"])
+        result = dict(storage_engine_bytes=(output / f"{name}.engine").stat().st_size,
+                      storage_onnx_bytes=(output / f"{name}.onnx").stat().st_size)
+        if measure:
+            # One fixed input batch, not the evaluation dataset. No duration floor.
+            times = time_forwards(launch, stream, options.warmup, options.iterations)
+            logits = buffers["logits"].cpu()
+            (output / f"{name}.times.json").write_text(
+                json.dumps([{"computeMs": value} for value in times]), encoding="utf-8")
+            (output / f"{name}.outputs.json").write_text(json.dumps([
+                {"name": "logits", "shape": list(logits.shape), "values": logits.flatten().tolist()}]), encoding="utf-8")
+            result.update(summarize_results(times, logits, reference))
+            result["compute_only_images_per_second"] = 1000 * x.shape[0] / result["gpu_compute_ms_mean"]
         if batches is not None:
             print(f"Evaluating {name} on real data (outside timing)", flush=True)
 
@@ -183,23 +187,48 @@ def benchmark_engine(trt, output, name, x, reference, options, batches=None):
         return result
 
 
+def run_backend(trt, output, name, model, x, reference, options, batches):
+    """Time batch 1 only; build an untimed accuracy engine when batch sizes differ."""
+    shared = batches is not None and options.eval_batch_size == x.shape[0]
+    result = benchmark_engine(trt, output, name, x, reference, options, batches if shared else None)
+    result.update(timing_batch_size=x.shape[0], timing_engine_name=name)
+    if batches is None:
+        return result
+    eval_name = name
+    accuracy = result
+    if not shared:
+        eval_name = f"{name}_eval_b{options.eval_batch_size}"
+        eval_x = x.expand(options.eval_batch_size, *x.shape[1:]).contiguous()
+        # Untimed execution only needs the output shape, not synthetic reference values.
+        eval_reference = reference.expand(options.eval_batch_size, *reference.shape[1:])
+        print(f"Exporting/building accuracy engine {eval_name} (no timing pass)", flush=True)
+        export_onnx(model, eval_x, output / f"{eval_name}.onnx")
+        accuracy = benchmark_engine(trt, output, eval_name, eval_x, eval_reference, options, batches, measure=False)
+        for key in ("top1_acc", "loss", "evaluated_samples"):
+            result[key] = accuracy[key]
+    result.update(eval_batch_size=options.eval_batch_size, eval_engine_name=eval_name,
+                  eval_storage_engine_bytes=accuracy["storage_engine_bytes"],
+                  eval_storage_onnx_bytes=accuracy["storage_onnx_bytes"])
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True, help="Directory for ONNX, engines, logs and reports")
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, choices=[1], default=1, help="Timing batch is fixed to 1")
+    parser.add_argument("--eval-batch-size", type=int, default=32, help="Accuracy evaluation batch size")
     parser.add_argument("--export-only", action="store_true", help="CPU export; no TensorRT required")
     parser.add_argument("--device", default="cuda", help="CUDA device, e.g. cuda:0")
     parser.add_argument("--data-root", help="Food-101 root; enables real-data accuracy evaluation")
     parser.add_argument("--eval-split", choices=["val", "test"], default="test")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--download", action="store_true")
-    parser.add_argument("--warmup-ms", type=int, default=1000)
-    parser.add_argument("--duration", type=int, default=10, help="Minimum benchmark seconds per engine")
-    parser.add_argument("--iterations", type=int, default=100)
+    parser.add_argument("--warmup", type=int, default=20, help="Warmup forwards on the single timing input")
+    parser.add_argument("--iterations", type=int, default=100, help="Exact number of timed batch-1 forwards")
     options = parser.parse_args(argv)
-    if options.batch_size < 1 or options.warmup_ms < 0 or options.duration < 1 or options.iterations < 1:
-        parser.error("batch-size/duration/iterations must be positive; warmup-ms must be nonnegative")
+    if options.eval_batch_size < 1 or options.warmup < 0 or options.iterations < 1:
+        parser.error("eval-batch-size/iterations must be positive; warmup must be nonnegative")
     if options.workers < 0:
         parser.error("workers must be nonnegative")
     if options.export_only and options.data_root:
@@ -230,7 +259,9 @@ def main(argv=None):
         expected, actual = source(x), converted(x)
         references = {"fp32_master": fp32(x), "w2_int8": actual}
     report = dict(checkpoint=str(options.checkpoint), torch_version=str(torch.__version__),
-                  batch_size=options.batch_size, image_size=config.image_size,
+                  batch_size=1, timing_batch_size=1,
+                  eval_batch_size=options.eval_batch_size if batches is not None else None,
+                  image_size=config.image_size,
                   weight_values="original W2 grid exported with INT8 Q/DQ; kernel precision unverified",
                   activations="symmetric INT8 derived from trained affine range; no new calibration",
                   qat_scope=config.qat_scope,
@@ -264,7 +295,7 @@ def main(argv=None):
         print("Evaluating original affine QAT on the same data", flush=True)
         source_metrics = evaluate(source.to(options.device), batches, options.device)
         report["source_qat"] = dict(top1_acc=source_metrics["top1_acc"], loss=source_metrics["loss"],
-                                    evaluated_samples=source_metrics["samples"])
+                                    evaluated_samples=source_metrics["samples"], eval_batch_size=options.eval_batch_size)
         source.cpu()
         with torch.cuda.device(options.device):
             torch.cuda.empty_cache()
@@ -274,13 +305,14 @@ def main(argv=None):
                       device=torch.cuda.get_device_name(options.device), cuda_version=torch.version.cuda,
                       tf32=False, amp=False, cuda_graph=False,
                       timing="CUDA events, synchronized each forward; excludes build and transfers",
-                      warmup_ms=options.warmup_ms, duration=options.duration, iterations=options.iterations)
+                      warmup=options.warmup, iterations=options.iterations)
         for name in ("fp32_master", "w2_int8"):
             report["engine_execution"] = f"building_or_running_{name}"
             report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
             print(f"Building/benchmarking {name} with TensorRT Python API", flush=True)
             try:
-                report[name] = benchmark_engine(trt, output, name, x, references[name], options, batches)
+                net = fp32 if name == "fp32_master" else converted
+                report[name] = run_backend(trt, output, name, net, x, references[name], options, batches)
                 report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
             except Exception as error:
                 report["engine_execution"] = f"failed_{name}"
