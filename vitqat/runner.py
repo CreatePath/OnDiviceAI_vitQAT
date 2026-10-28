@@ -27,7 +27,7 @@ def run(args, *, build_model, measure_model, train_epoch_fn=train_epoch,
         # Preserve runtime choices; restore the saved experiment before building data/model.
         runtime = {"eval_checkpoint", "resume", "output", "data_root", "download", "device",
                    "workers", "threads", "batch_size", "latency_warmup", "latency_repeats",
-                   "experiment"}
+                   "experiment", "eval_backend"}
         for key, value in checkpoint["config"].items():
             if key in vars(args) and key not in runtime:
                 setattr(args, key, value)

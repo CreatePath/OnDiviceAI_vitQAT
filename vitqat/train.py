@@ -26,6 +26,21 @@ def measure_model(model, args):
 
 def main(args):
     if args.eval_checkpoint:
+        if args.resume:
+            raise ValueError("Choose resume or eval-checkpoint")
+        if args.eval_backend == "tensorrt":
+            import torch
+            from scripts.benchmark_tensorrt_int8 import main as evaluate_tensorrt
+
+            if args.threads > 0:
+                torch.set_num_threads(args.threads)
+            options = ["--checkpoint", args.eval_checkpoint, "--output", args.output,
+                       "--data-root", args.data_root, "--device", args.device,
+                       "--eval-batch-size", str(args.batch_size), "--workers", str(args.workers),
+                       "--warmup", str(args.latency_warmup), "--iterations", str(args.latency_repeats)]
+            if args.download:
+                options.append("--download")
+            return evaluate_tensorrt(options)
         return run(args, build_model=build_model, measure_model=measure_model, train_epoch_fn=train_epoch)
     if args.mode is None:
         raise ValueError("--mode is required for training")

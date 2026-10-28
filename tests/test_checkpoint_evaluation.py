@@ -74,3 +74,22 @@ def test_training_still_requires_mode(tmp_path):
     args = parser().parse_args(["--output", str(tmp_path)])
     with pytest.raises(ValueError, match="--mode"):
         main(args)
+
+
+def test_checkpoint_defaults_to_tensorrt_and_forwards_runtime_options(tmp_path, monkeypatch):
+    from vitqat.train import main
+    from scripts import benchmark_tensorrt_int8
+
+    seen = []
+    monkeypatch.setattr(benchmark_tensorrt_int8, "main", lambda argv: seen.append(argv) or {"backend": "tensorrt_python"})
+    args = parser().parse_args(["--eval-checkpoint", "best.pt", "--output", str(tmp_path),
+        "--data-root", "/data", "--device", "cuda:1", "--batch-size", "64", "--workers", "2",
+        "--latency-warmup", "20", "--latency-repeats", "100", "--download"])
+    assert args.eval_backend == "tensorrt"
+    assert main(args)["backend"] == "tensorrt_python"
+    assert seen == [["--checkpoint", "best.pt", "--output", str(tmp_path), "--data-root", "/data",
+        "--device", "cuda:1", "--eval-batch-size", "64", "--workers", "2",
+        "--warmup", "20", "--iterations", "100", "--download"]]
+    args.resume = "last.pt"
+    with pytest.raises(ValueError, match="resume"):
+        main(args)

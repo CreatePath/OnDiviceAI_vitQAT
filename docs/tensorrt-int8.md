@@ -1,5 +1,16 @@
 # W2 가중치를 유지하는 TensorRT INT8 실행
 
+## FP32 체크포인트 평가도 지원
+
+`python -m vitqat.train --eval-checkpoint ... --output ...`는 이제 기본적으로
+TensorRT에서 평가한다. FP32 체크포인트는 원래 가중치를 그대로 사용한 `fp32` 엔진으로,
+W2A8 체크포인트는 기존 `fp32_master`/`w2_int8` 엔진으로 평가한다.
+아래 독립 benchmark CLI도 FP32 체크포인트를 자동 인식하며 `--export-only`를 지원한다.
+`fp32_master`는 QAT 가중치의 FP32 표현이고, `fp32`는 별도로 학습한 FP32 체크포인트이므로
+결과 이름을 구분한다. [평가 명령과 결과 형식](experiments.md)을 참조한다.
+기존 PyTorch 평가를 원하면 `--eval-backend pytorch`를 지정한다.
+TensorRT 출력 폴더는 새 빈 폴더여야 한다.
+
 기존 W2A8 QAT 체크포인트를 TensorRT용 explicit INT8 Q/DQ ONNX로 내보낸다.
 Linear/Conv뿐 아니라 backbone attention의 Q/K/V, softmax 확률에도 INT8 Q/DQ를 넣는다.
 TensorRT가 실제로 선택한 커널은 엔진의 레이어 보고서로 별도 확인해야 한다.
