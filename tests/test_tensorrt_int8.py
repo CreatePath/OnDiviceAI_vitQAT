@@ -168,9 +168,22 @@ def test_csv_keeps_accuracy_and_timing_separate(tmp_path):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Native TensorRT requires CUDA PyTorch")
 @pytest.mark.parametrize("quantized", [False, True])
-def test_native_python_execution(tmp_path, quantized):
+def test_native_python_execution(tmp_path, quantized, monkeypatch):
     pytest.importorskip("tensorrt")
     from scripts.benchmark_tensorrt_int8 import run_backend, require_tensorrt
+    from scripts import benchmark_tensorrt_int8 as runner
+
+    original_time_forwards = runner.time_forwards
+    caller_stream = torch.cuda.current_stream()
+    measured_streams = []
+
+    def check_stream(launch, stream, warmup, iterations):
+        assert stream == torch.cuda.current_stream()
+        assert stream != torch.cuda.default_stream()
+        measured_streams.append(stream.cuda_stream)
+        return original_time_forwards(launch, stream, warmup, iterations)
+
+    monkeypatch.setattr(runner, "time_forwards", check_stream)
 
     torch.manual_seed(42)
     x = torch.randn(16, 32)
@@ -191,6 +204,9 @@ def test_native_python_execution(tmp_path, quantized):
     from torch.utils.data import DataLoader, TensorDataset
     batches = DataLoader(TensorDataset(x[:7], reference[:7].argmax(-1)), batch_size=4)
     result = run_backend(require_tensorrt("cuda"), tmp_path, "native", layer, x[:1], reference[:1], options, batches)
+    assert torch.cuda.current_stream() == caller_stream
+    assert len(measured_streams) == 1
+    assert result["cuda_stream"] == "dedicated_non_default"
     assert result["samples"] == 2
     assert result["synthetic_native_vs_reference_max_abs_error"] <= tolerance
     assert (tmp_path / "native.engine").stat().st_size > 0

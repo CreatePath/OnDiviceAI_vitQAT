@@ -57,3 +57,10 @@ Inspect `*.layers.json` to establish actual INT8 kernel use; export success alon
 does not establish acceleration. `--export-only` does not measure real accuracy or
 native latency. CPU ONNX tests and CUDA-gated native tests live in
 `A3/tests/test_tensorrt_int8.py`.
+
+TensorRT runs on a dedicated non-default CUDA stream, shared by input copies,
+enqueue, timing events, and output copies. Blocking CPU output copies complete
+before accuracy is computed. This avoids the default-stream synchronization warning;
+rerun both conditions after updating when comparing latency with older results.
+A3 shape validation remains active in eager execution but is omitted during
+fixed-shape ONNX tracing. Other library-level tracing warnings may still appear.

@@ -117,7 +117,11 @@ def time_forwards(launch, stream, warmup, iterations):
 @torch.inference_mode()
 def benchmark_engine(trt, output, name, x, reference, options, batches=None, *, measure=True):
     """Build once, bind PyTorch CUDA buffers, then time serialized forwards."""
-    with torch.cuda.device(options.device):
+    caller_stream = torch.cuda.current_stream(options.device)
+    # Copies, TensorRT enqueue and CUDA events must use the SAME non-default stream.
+    with torch.cuda.device(options.device), torch.cuda.stream(torch.cuda.Stream(device=options.device)):
+        stream = torch.cuda.current_stream()
+        stream.wait_stream(caller_stream)
         logger = trt.Logger(trt.Logger.WARNING)
         builder = trt.Builder(logger)
         network = builder.create_network(0)  # TensorRT 10 always uses explicit batch.
@@ -157,13 +161,12 @@ def benchmark_engine(trt, output, name, x, reference, options, batches=None, *, 
         inspector.execution_context = context
         (output / f"{name}.layers.json").write_text(
             inspector.get_engine_information(trt.LayerInformationFormat.JSON), encoding="utf-8")
-        stream = torch.cuda.current_stream()
-
         def launch():
             if not context.execute_async_v3(stream.cuda_stream):
                 raise RuntimeError(f"{name}: TensorRT execution failed")
 
-        result = dict(storage_engine_bytes=(output / f"{name}.engine").stat().st_size,
+        result = dict(cuda_stream="dedicated_non_default",
+                      storage_engine_bytes=(output / f"{name}.engine").stat().st_size,
                       storage_onnx_bytes=(output / f"{name}.onnx").stat().st_size)
         if measure:
             # One fixed input batch, not the evaluation dataset. No duration floor.
