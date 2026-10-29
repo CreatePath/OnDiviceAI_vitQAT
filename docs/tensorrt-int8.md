@@ -213,3 +213,23 @@ Python API 전환 후 PyTorch 2.3 CPU에서 관련 테스트는 9 passed, native
 참고: [TensorRT explicit quantization](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/inference-library/work-quantized-types.html),
 [엔진 검사 도구](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/engine-tools.html),
 [TensorRT Python API](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/python-api-docs.html).
+
+## Experiment 1-d checkpoints
+
+W2A8 checkpoints trained with CLS pruning are supported by both TensorRT entry points.
+The saved cls_pruning policy and cls_pruning_rate restore the wrapper before strict state loading; backbone-prefixed weights and quantizer buffers are preserved.
+
+For the checkpoint inference policy (including train-only pruning evaluating dense):
+
+```powershell
+python -m scripts.benchmark_tensorrt_int8 --checkpoint runs/1-d/best.pt --output runs/1-d-trt --data-root data --device cuda
+```
+
+For a paired dense/pruned comparison using the saved pruning rate:
+
+```powershell
+python -m A3.benchmark_tensorrt_int8 --checkpoint runs/1-d/best.pt --output runs/1-d-a3-trt --data-root data --device cuda
+```
+
+Both A3 variants share the same trained weights. The dense result disables inference pruning; it is not an independently trained dense baseline. A3.eval_pruning also accepts these checkpoints for PyTorch comparison.
+Use --export-only without --data-root for CPU export checks on the general entry point. Native TensorRT execution still requires CUDA and TensorRT.

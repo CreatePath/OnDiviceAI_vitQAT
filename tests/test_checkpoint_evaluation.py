@@ -19,6 +19,7 @@ def test_evaluation_restores_config_and_keeps_runtime_options(tmp_path, monkeypa
         "--mixup", "0.8", "--cutmix", "1.0", "--seed", "7", "--val-fraction", "0.2",
         "--epochs", "1", "--warmup-epochs", "0", "--batch-size", "128"])
     original = nn.Linear(4, 2)
+    saved.cls_pruning, saved.cls_pruning_rate = "train_and_inference", 8
     path = tmp_path / "best.pt"
     torch.save(dict(config=vars(saved), model=original.state_dict(), split_hash="saved-split",
                     epoch=0, best_acc=50.0), path)
@@ -29,6 +30,7 @@ def test_evaluation_restores_config_and_keeps_runtime_options(tmp_path, monkeypa
     seen = []
 
     def check_config(config):
+        assert config.cls_pruning == "train_and_inference" and config.cls_pruning_rate == 8
         for key in ("mode", "model", "image_size", "activation_bits", "use_cropr", "cropr_llf",
                     "cropr_pruning_rate", "qat_scope", "seed", "val_fraction", "mixup", "cutmix", "epochs"):
             assert getattr(config, key) == getattr(saved, key), key

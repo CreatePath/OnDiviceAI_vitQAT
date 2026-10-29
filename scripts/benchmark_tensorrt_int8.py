@@ -12,7 +12,8 @@ import torch
 from vitqat.cli import parser as training_parser
 from vitqat.models import build_model
 from vitqat.data import loader, make_data
-from vitqat.metrics import measure_vit
+from A3.metrics import measure_vit
+from A3.pruning.checkpoint import checkpoint_model
 from vitqat.tensorrt_int8 import audit_attention_qdq, convert_tensorrt_int8, export_onnx
 from vitqat.training import evaluate, seed_all
 
@@ -252,14 +253,14 @@ def main(argv=None):
     trt = None if options.export_only else require_tensorrt(options.device)
     batches, manifest = evaluation_data(config, checkpoint, options) if options.data_root else (None, None)
     seed_all(config.seed)
-    source = build_model(config)
+    source = checkpoint_model(build_model(config), config)
     source.load_state_dict(checkpoint["model"], strict=True)
     source.eval()
     if is_qat:
         converted = convert_tensorrt_int8(source)
         fp_config = copy.copy(config)
         fp_config.mode = "fp32"
-        fp32 = build_model(fp_config)
+        fp32 = checkpoint_model(build_model(fp_config), fp_config)
         fp32.load_state_dict({key: checkpoint["model"][key] for key in fp32.state_dict()}, strict=True)
         fp32.eval()
         models = {"fp32_master": fp32, "w2_int8": converted}

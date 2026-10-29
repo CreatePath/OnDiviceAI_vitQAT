@@ -14,7 +14,10 @@ def train_epoch(model, batches, optimizer, args, epoch, steps_per_epoch):
 
 
 def measure_model(model, args):
-    metrics = measure_vit(model, args.image_size, args.device,
+    measure = measure_vit
+    if getattr(args, "cls_pruning", None):
+        from A3.metrics import measure_vit as measure
+    metrics = measure(model, args.image_size, args.device,
                                 args.latency_warmup, args.latency_repeats)
     metrics.update(model=args.model, mode=args.mode, use_cropr=args.use_cropr,
                    cropr_pruning_rate=args.cropr_pruning_rate if args.use_cropr else 0,
@@ -41,7 +44,9 @@ def main(args):
             if args.download:
                 options.append("--download")
             return evaluate_tensorrt(options)
-        return run(args, build_model=build_model, measure_model=measure_model, train_epoch_fn=train_epoch)
+        from A3.pruning.checkpoint import checkpoint_model
+        return run(args, build_model=lambda config: checkpoint_model(build_model(config), config),
+                   measure_model=measure_model, train_epoch_fn=train_epoch)
     if args.mode is None:
         raise ValueError("--mode is required for training")
     if args.aux_loss_weight < 0:

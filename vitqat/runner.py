@@ -29,7 +29,7 @@ def run(args, *, build_model, measure_model, train_epoch_fn=train_epoch,
                    "workers", "threads", "batch_size", "latency_warmup", "latency_repeats",
                    "experiment", "eval_backend"}
         for key, value in checkpoint["config"].items():
-            if key in vars(args) and key not in runtime:
+            if (key in vars(args) or key in {"cls_pruning", "cls_pruning_rate"}) and key not in runtime:
                 setattr(args, key, value)
         if args.experiment is None:
             args.experiment = checkpoint["config"].get("experiment")
